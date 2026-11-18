@@ -1,0 +1,208 @@
+import json
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+from threading import Barrier
+
+from fastapi import HTTPException
+from pydantic import ValidationError
+from sqlalchemy import URL, create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from backend.app.agent.tool_registry import ToolRegistry
+from backend.app.db.base import Base
+from backend.app.db.migrations import migrate_task_time_range
+from backend.app.models.task import TaskORM
+from backend.app.services.task_service import list_tasks
+
+
+class TaskScheduleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine(
+            "sqlite+pysqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(self.engine)
+        self.registry = ToolRegistry()
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+    def create(self, title: str, start_at: str, duration_minutes: int) -> dict:
+        arguments = json.dumps({
+            "title": title,
+            "start_at": start_at,
+            "duration_minutes": duration_minutes,
+        }, ensure_ascii=False)
+        with Session(self.engine) as session:
+            return json.loads(self.registry.execute_tool("create_task", arguments, session))
+
+    def test_requires_a_time_and_valid_duration(self) -> None:
+        with Session(self.engine) as session:
+            for data in (
+                {"title": "缺时间"},
+                {"title": "缺开始时间", "duration_minutes": 30},
+                {"title": "仅截止不能有时长", "due_at": "2026-11-18T15:00:00+08:00", "duration_minutes": 30},
+                {"title": "零时长", "start_at": "2026-11-18T14:00:00+08:00", "duration_minutes": 0},
+            ):
+                with self.subTest(data=data), self.assertRaises(ValidationError):
+                    self.registry.execute_tool("create_task", json.dumps(data, ensure_ascii=False), session)
+
+    def test_overlap_rejected_but_adjacent_interval_allowed(self) -> None:
+        first = self.create("A", "2026-11-18T14:00:00", 60)
+        self.assertEqual(first["start_at"], "2026-11-18T14:00:00+08:00")
+        self.assertEqual(first["end_at"], "2026-11-18T15:00:00+08:00")
+        self.assertEqual(first["duration_minutes"], 60)
+
+        with self.assertRaises(HTTPException) as raised:
+            self.create("冲突", "2026-11-18T06:30:00Z", 30)
+        self.assertEqual(raised.exception.status_code, 409)
+
+        second = self.create("B", "2026-11-18T15:00:00+08:00", 30)
+        self.assertNotEqual(first["id"], second["id"])
+        with Session(self.engine) as session:
+            self.assertEqual(len(list_tasks(session)), 2)
+
+    def test_missing_duration_stays_empty(self) -> None:
+        arguments = json.dumps({
+            "title": "默认时长",
+            "start_at": "2026-11-18T14:00:00",
+        }, ensure_ascii=False)
+        with Session(self.engine) as session:
+            task = json.loads(self.registry.execute_tool("create_task", arguments, session))
+        self.assertIsNone(task["duration_minutes"])
+        self.assertIsNone(task["end_at"])
+
+    def test_due_only_and_start_only_do_not_claim_time(self) -> None:
+        with Session(self.engine) as session:
+            due_only = json.loads(self.registry.execute_tool("create_task", json.dumps({
+                "title": "截止任务", "due_at": "2026-11-18T15:00:00+08:00",
+            }, ensure_ascii=False), session))
+        self.assertIsNone(due_only["start_at"])
+        self.assertIsNone(due_only["duration_minutes"])
+        self.assertEqual(due_only["due_at"], "2026-11-18T15:00:00+08:00")
+
+        self.create("占用时间", "2026-11-18T14:00:00+08:00", 60)
+        with Session(self.engine) as session:
+            start_only = json.loads(self.registry.execute_tool("create_task", json.dumps({
+                "title": "只有开始", "start_at": "2026-11-18T14:30:00+08:00",
+            }, ensure_ascii=False), session))
+        self.assertEqual(start_only["start_at"], "2026-11-18T14:30:00+08:00")
+        self.assertIsNone(start_only["end_at"])
+        self.assertIsNone(start_only["duration_minutes"])
+
+    def test_due_date_and_scheduled_interval_are_independent(self) -> None:
+        arguments = json.dumps({
+            "title": "两个时间维度",
+            "start_at": "2026-11-18T14:00:00+08:00",
+            "duration_minutes": 60,
+            "due_at": "2026-11-17T12:00:00+08:00",
+        }, ensure_ascii=False)
+        with Session(self.engine) as session:
+            task = json.loads(self.registry.execute_tool("create_task", arguments, session))
+        self.assertEqual(task["end_at"], "2026-11-18T15:00:00+08:00")
+        self.assertEqual(task["due_at"], "2026-11-17T12:00:00+08:00")
+
+    def test_done_and_legacy_unscheduled_tasks_do_not_block(self) -> None:
+        with Session(self.engine) as session, session.begin():
+            session.add(TaskORM(title="旧任务", priority="medium", status="todo", version=1))
+        with Session(self.engine) as session:
+            legacy = list_tasks(session)[0]
+            self.assertIsNone(legacy.start_at)
+            self.assertIsNone(legacy.duration_minutes)
+
+        first = self.create("已完成", "2026-11-18T14:00:00+08:00", 60)
+        with Session(self.engine) as session, session.begin():
+            session.get(TaskORM, first["id"]).status = "done"
+        self.create("可复用时间", "2026-11-18T14:30:00+08:00", 30)
+
+    def test_database_rejects_invalid_interval(self) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        with self.assertRaises(IntegrityError):
+            with Session(self.engine) as session, session.begin():
+                session.add(TaskORM(
+                    title="无效区间",
+                    priority="medium",
+                    status="todo",
+                    version=1,
+                    start_at=datetime(2026, 11, 18, 7, tzinfo=timezone.utc).replace(tzinfo=None),
+                    end_at=datetime(2026, 11, 18, 6, tzinfo=timezone.utc).replace(tzinfo=None),
+                ))
+
+    def test_concurrent_creation_keeps_one_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            engine = create_engine(
+                URL.create("sqlite+pysqlite", database=str(Path(directory) / "tasks.db")),
+                connect_args={"timeout": 10},
+            )
+            Base.metadata.create_all(engine)
+            barrier = Barrier(2)
+
+            def create_once(title: str) -> str:
+                arguments = json.dumps({
+                    "title": title,
+                    "start_at": "2026-11-18T14:00:00+08:00",
+                    "duration_minutes": 60,
+                }, ensure_ascii=False)
+                barrier.wait()
+                with Session(engine) as session:
+                    try:
+                        self.registry.execute_tool("create_task", arguments, session)
+                        return "created"
+                    except HTTPException as exc:
+                        self.assertEqual(exc.status_code, 409)
+                        return "conflict"
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    outcomes = list(pool.map(create_once, ["A", "B"]))
+                self.assertCountEqual(outcomes, ["created", "conflict"])
+            finally:
+                engine.dispose()
+
+    def test_old_task_constraint_is_migrated_without_losing_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            engine = create_engine(URL.create(
+                "sqlite+pysqlite", database=str(Path(directory) / "old.db")
+            ))
+            try:
+                with engine.begin() as connection:
+                    connection.exec_driver_sql("""
+                        CREATE TABLE tasks (
+                            id INTEGER PRIMARY KEY, title VARCHAR(100) NOT NULL,
+                            priority VARCHAR(20) NOT NULL, due_at DATETIME,
+                            start_at DATETIME, end_at DATETIME,
+                            status VARCHAR(20) NOT NULL, version INTEGER NOT NULL,
+                            CONSTRAINT ck_task_time_range CHECK (
+                                (start_at IS NULL AND end_at IS NULL) OR
+                                (start_at IS NOT NULL AND end_at IS NOT NULL AND end_at > start_at)
+                            )
+                        )
+                    """)
+                    connection.exec_driver_sql("""
+                        INSERT INTO tasks VALUES
+                        (7, '旧任务', 'medium', NULL, '2030-01-02 06:00:00',
+                         '2030-01-02 07:00:00', 'todo', 1)
+                    """)
+                migrate_task_time_range(engine)
+                migrate_task_time_range(engine)
+                with engine.begin() as connection:
+                    self.assertEqual(connection.exec_driver_sql(
+                        "SELECT title FROM tasks WHERE id = 7"
+                    ).scalar_one(), "旧任务")
+                    connection.exec_driver_sql("""
+                        INSERT INTO tasks VALUES
+                        (8, '只有开始', 'medium', NULL, '2030-01-02 08:00:00',
+                         NULL, 'todo', 1)
+                    """)
+            finally:
+                engine.dispose()
+
+
+if __name__ == "__main__":
+    unittest.main()

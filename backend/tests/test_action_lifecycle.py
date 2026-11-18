@@ -1,0 +1,258 @@
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
+from unittest.mock import patch
+
+from fastapi import HTTPException
+from sqlalchemy import URL, create_engine, select
+from sqlalchemy.orm import Session
+
+from backend.app.db.base import Base
+from backend.app.db.migrations import migrate_action_statuses
+from backend.app.models.action import PendingActionORM
+from backend.app.models.task import TaskORM
+from backend.app.schemas.task import TaskCreate, TaskUpdate
+from backend.app.repositories import task_repository
+from backend.app.services import action_service, task_service
+
+
+class ActionLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.engine = create_engine(URL.create(
+            "sqlite+pysqlite", database=str(Path(self.directory.name) / "actions.db")
+        ))
+        Base.metadata.create_all(self.engine)
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+        self.directory.cleanup()
+
+    def create_task(self):
+        with Session(self.engine) as session:
+            return task_service.create_task(
+                TaskCreate(title="原任务", start_at="2030-01-02T14:00:00+08:00"), session
+            )
+
+    def propose(self, task_id: int, title: str):
+        with Session(self.engine) as session:
+            return action_service.propose_update(
+                session, task_id, TaskUpdate(title=title)
+            )
+
+    def status(self, action_id: int) -> str:
+        with Session(self.engine) as session:
+            return session.get(PendingActionORM, action_id).status
+
+    def test_new_proposal_replaces_old_one(self) -> None:
+        task = self.create_task()
+        old = self.propose(task.id, "旧修改")
+        new = self.propose(task.id, "新修改")
+        self.assertEqual(self.status(old.id), "replaced")
+        self.assertEqual(self.status(new.id), "pending")
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            action_service.confirm_action(session, old.id)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("替换", raised.exception.detail)
+        with Session(self.engine) as session:
+            action_service.confirm_action(session, new.id)
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(TaskORM, task.id).title, "新修改")
+
+    def test_expired_proposal_is_rejected_and_swept(self) -> None:
+        task = self.create_task()
+        expired = self.propose(task.id, "过期修改")
+        with Session(self.engine) as session, session.begin():
+            session.get(PendingActionORM, expired.id).expires_at = 0
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            action_service.confirm_action(session, expired.id)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("过期", raised.exception.detail)
+        self.assertEqual(self.status(expired.id), "expired")
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised_again:
+            action_service.confirm_action(session, expired.id)
+        self.assertIn("已过期", raised_again.exception.detail)
+
+        unattended = self.propose(task.id, "无人处理")
+        with Session(self.engine) as session, session.begin():
+            session.get(PendingActionORM, unattended.id).expires_at = 0
+        with Session(self.engine) as session:
+            self.assertEqual(action_service.expire_due_actions(session), 1)
+        self.assertEqual(self.status(unattended.id), "expired")
+        with Session(self.engine) as session:
+            self.assertEqual(action_service.expire_due_actions(session), 0)
+
+    def test_stale_version_marks_conflict_and_allows_new_proposal(self) -> None:
+        task = self.create_task()
+        old = self.propose(task.id, "计划改名")
+        with Session(self.engine) as session, session.begin():
+            current = session.get(TaskORM, task.id)
+            current.title = "别处已修改"
+            current.version += 1
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            action_service.confirm_action(session, old.id)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("版本", raised.exception.detail)
+        self.assertEqual(self.status(old.id), "conflicted")
+        with Session(self.engine) as session:
+            self.assertEqual(session.get(TaskORM, task.id).title, "别处已修改")
+        new = self.propose(task.id, "重新改名")
+        self.assertEqual(new.before.title, "别处已修改")
+        self.assertEqual(new.before.version, 2)
+
+    def test_repeated_confirm_and_cancel_do_not_reopen_action(self) -> None:
+        task = self.create_task()
+        action = self.propose(task.id, "确认一次")
+        with Session(self.engine) as session:
+            action_service.confirm_action(session, action.id)
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            action_service.confirm_action(session, action.id)
+        self.assertIn("已执行", raised.exception.detail)
+        with Session(self.engine) as session:
+            current = session.get(TaskORM, task.id)
+            self.assertEqual((current.title, current.version), ("确认一次", 2))
+
+        cancelled = self.propose(task.id, "要取消")
+        with Session(self.engine) as session:
+            action_service.cancel_action(session, cancelled.id)
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            action_service.confirm_action(session, cancelled.id)
+        self.assertIn("已取消", raised.exception.detail)
+        self.assertEqual(self.status(cancelled.id), "cancelled")
+
+    def test_unknown_action_id_is_not_confirmed(self) -> None:
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            action_service.confirm_action(session, 999999)
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_deterministic_failure_rolls_back_task_and_marks_failed(self) -> None:
+        task = self.create_task()
+        action = self.propose(task.id, "失败的修改")
+        original_update = task_repository.update_if_version
+
+        def update_then_fail(*args, **kwargs):
+            self.assertEqual(original_update(*args, **kwargs), 1)
+            raise action_service.ActionExecutionError("模拟确定性执行失败")
+
+        with patch.object(task_repository, "update_if_version", side_effect=update_then_fail):
+            with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+                action_service.confirm_action(session, action.id)
+        self.assertEqual(raised.exception.status_code, 500)
+        self.assertIn("模拟确定性执行失败", raised.exception.detail)
+        with Session(self.engine) as session:
+            current = session.get(TaskORM, task.id)
+            self.assertEqual((current.title, current.version), ("原任务", 1))
+            self.assertEqual(action_service.get_action(session, action.id).status, "failed")
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as retry:
+            action_service.confirm_action(session, action.id)
+        self.assertEqual(retry.exception.status_code, 409)
+        self.assertIn("执行失败", retry.exception.detail)
+
+    def test_unknown_failure_rolls_back_without_falsely_marking_failed(self) -> None:
+        task = self.create_task()
+        action = self.propose(task.id, "未知错误")
+        original_update = task_repository.update_if_version
+
+        def update_then_fail(*args, **kwargs):
+            original_update(*args, **kwargs)
+            raise RuntimeError("执行结果不明")
+
+        with patch.object(task_repository, "update_if_version", side_effect=update_then_fail):
+            with Session(self.engine) as session, self.assertRaises(RuntimeError):
+                action_service.confirm_action(session, action.id)
+        with Session(self.engine) as session:
+            current = session.get(TaskORM, task.id)
+            self.assertEqual((current.title, current.version), ("原任务", 1))
+        self.assertEqual(self.status(action.id), "pending")
+
+    def test_invalid_saved_snapshot_becomes_failed_and_remains_readable(self) -> None:
+        task = self.create_task()
+        action = self.propose(task.id, "损坏快照")
+        with Session(self.engine) as session, session.begin():
+            session.get(PendingActionORM, action.id).after_snapshot = {"bad": "data"}
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            action_service.confirm_action(session, action.id)
+        self.assertEqual(raised.exception.status_code, 500)
+        self.assertIn("快照", raised.exception.detail)
+        with Session(self.engine) as session:
+            failed = action_service.get_action(session, action.id)
+            self.assertEqual(failed.status, "failed")
+            self.assertIsNone(failed.after)
+            self.assertEqual(session.get(TaskORM, task.id).title, "原任务")
+
+    def test_confirm_and_cancel_race_has_one_winner(self) -> None:
+        task = self.create_task()
+        action = self.propose(task.id, "竞态修改")
+        barrier = Barrier(2)
+
+        def attempt(operation: str) -> str:
+            barrier.wait()
+            with Session(self.engine) as session:
+                try:
+                    if operation == "confirm":
+                        action_service.confirm_action(session, action.id)
+                    else:
+                        action_service.cancel_action(session, action.id)
+                    return operation
+                except HTTPException as exc:
+                    self.assertEqual(exc.status_code, 409)
+                    return "conflict"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, ["confirm", "cancel"]))
+        self.assertEqual(outcomes.count("conflict"), 1)
+        final_status = self.status(action.id)
+        with Session(self.engine) as session:
+            current = session.get(TaskORM, task.id)
+            if final_status == "executed":
+                self.assertEqual((current.title, current.version), ("竞态修改", 2))
+            else:
+                self.assertEqual(final_status, "cancelled")
+                self.assertEqual((current.title, current.version), ("原任务", 1))
+
+
+class ActionMigrationTests(unittest.TestCase):
+    def test_old_sqlite_constraint_is_migrated_without_losing_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            engine = create_engine(URL.create(
+                "sqlite+pysqlite", database=str(Path(directory) / "old.db")
+            ))
+            try:
+                with engine.begin() as connection:
+                    connection.exec_driver_sql("""
+                        CREATE TABLE pending_actions (
+                            id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL,
+                            action_type VARCHAR(10) NOT NULL,
+                            status VARCHAR(16) NOT NULL,
+                            expected_version INTEGER NOT NULL,
+                            before_snapshot JSON NOT NULL, after_snapshot JSON,
+                            created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+                            CONSTRAINT ck_action_type CHECK (action_type IN ('update', 'delete')),
+                            CONSTRAINT ck_action_status CHECK (status IN (
+                                'pending', 'executed', 'cancelled', 'expired', 'conflicted'
+                            ))
+                        )
+                    """)
+                    connection.exec_driver_sql(
+                        "CREATE INDEX ix_pending_actions_task_id ON pending_actions (task_id)"
+                    )
+                    connection.exec_driver_sql("""
+                        INSERT INTO pending_actions VALUES
+                        (7, 3, 'delete', 'pending', 1, '{}', NULL, 1, 100)
+                    """)
+                migrate_action_statuses(engine)
+                migrate_action_statuses(engine)
+                with engine.begin() as connection:
+                    self.assertEqual(connection.exec_driver_sql(
+                        "SELECT task_id, status FROM pending_actions WHERE id = 7"
+                    ).one(), (3, "pending"))
+                    connection.exec_driver_sql(
+                        "UPDATE pending_actions SET status = 'replaced' WHERE id = 7"
+                    )
+                    self.assertEqual(connection.exec_driver_sql(
+                        "SELECT status FROM pending_actions WHERE id = 7"
+                    ).scalar_one(), "replaced")
+            finally:
+                engine.dispose()
