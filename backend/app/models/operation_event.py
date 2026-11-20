@@ -25,9 +25,10 @@ class OperationEventORM(Base):
     __table_args__ = (
         CheckConstraint(
             "event_type IN ("
-            "'task_created', 'proposal_created', 'proposal_replaced', "
+            "'task_created', 'task_updated', 'task_deleted', "
+            "'proposal_created', 'proposal_replaced', "
             "'proposal_expired', 'proposal_executed', 'proposal_cancelled', "
-            "'proposal_conflicted', 'proposal_failed')",
+            "'proposal_conflicted', 'proposal_failed', 'proposal_deleted')",
             name="ck_operation_event_type",
         ),
         Index("ix_operation_events_task_id_id", "task_id", "id"),

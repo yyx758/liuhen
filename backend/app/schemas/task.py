@@ -69,6 +69,10 @@ class TaskRead(BaseModel):
     version: int = 1
 
 
+class TaskListItem(TaskRead):
+    created_by_agent: bool = False
+
+
 #修改task请求
 class TaskUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")

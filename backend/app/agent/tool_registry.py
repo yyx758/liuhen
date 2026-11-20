@@ -1,7 +1,10 @@
 """Agent 可调用的任务工具；API 路由不会自动成为 Agent 工具。"""
 
+from contextlib import nullcontext
 from datetime import datetime
+import json
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from sqlalchemy.orm import Session
@@ -53,7 +56,41 @@ def get_action(data: ActionIdArguments, session: Session):
 
 
 def propose_update(data: UpdateProposalArguments, session: Session):
-    return action_service.propose_update(session, data.task_id, data.changes)
+    changes = data.changes.model_dump(exclude_unset=True)
+    groups = [
+        {name: changes[name] for name in fields if name in changes}
+        for fields in (
+            ("title",), ("priority",),
+            ("start_at", "end_at", "duration_minutes"),
+            ("due_at",), ("status",),
+        )
+    ]
+    groups = [group for group in groups if group]
+    if len(groups) <= 1:
+        return action_service.propose_update(session, data.task_id, data.changes)
+
+    owns_transaction = not session.info.get("chat_tool_transaction")
+    with session.begin() if owns_transaction else nullcontext():
+        if owns_transaction and session.get_bind().dialect.name == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        previous_batch = session.info.get("proposal_batch_id")
+        session.info["proposal_batch_id"] = (
+            previous_batch or session.info.get("audit_request_id") or str(uuid4())
+        )
+        if owns_transaction:
+            session.info["chat_tool_transaction"] = True
+        try:
+            return [
+                action_service.propose_update(session, data.task_id, TaskUpdate(**group))
+                for group in groups
+            ]
+        finally:
+            if previous_batch is None:
+                session.info.pop("proposal_batch_id", None)
+            else:
+                session.info["proposal_batch_id"] = previous_batch
+            if owns_transaction:
+                session.info.pop("chat_tool_transaction", None)
 
 
 def propose_delete(data: TaskIdArguments, session: Session):
@@ -111,6 +148,15 @@ def format_proposal(result_json: str) -> str:
     )
 
 
+def format_proposals(result_json: str) -> str:
+    result = json.loads(result_json)
+    if isinstance(result, list):
+        return "\n\n".join(
+            format_proposal(json.dumps(item, ensure_ascii=False)) for item in result
+        )
+    return format_proposal(result_json)
+
+
 class ToolRegistry:
     def __init__(self):
         # 所有 handler 都接受 (已校验参数, Session)，终止回复由工具自己的配置提供。
@@ -136,10 +182,10 @@ class ToolRegistry:
                 "handler": get_action,
             },
             "propose_update": {
-                "description": "为已定位的任务创建修改提案，不立即修改。changes 可修改标题、优先级、开始时间、结束时间、时长、截止时间和状态；时间字段必须相互一致，确认时再次检查冲突。需要用户通过独立确认入口执行。",
+                "description": "为已定位的任务创建修改提案，不立即修改。changes 可修改标题、优先级、开始时间、结束时间、时长、截止时间和状态；独立修改会拆成分别确认的提案，开始时间、结束时间和时长作为一组。时间字段必须相互一致，确认时再次检查冲突。",
                 "schema": UpdateProposalArguments,
                 "handler": propose_update,
-                "terminal_reply": format_proposal,
+                "terminal_reply": format_proposals,
             },
             "propose_delete": {
                 "description": "为已定位的任务创建删除提案，不立即删除；需要用户通过独立确认入口执行。",

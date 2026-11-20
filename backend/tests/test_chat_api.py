@@ -14,9 +14,11 @@ from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.config.settings import USER_TIMEZONE
 from backend.app.db.base import Base
+from backend.app.db.session import get_db
 from backend.app.main import app
+from backend.app.models.conversation import ConversationMessageORM, ConversationORM
 from backend.app.models.operation_event import OperationEventORM
-from backend.app.models.request import ChatTurnORM
+from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM
 from backend.app.models.task import TaskORM
 from backend.app.services import chat_service, conversation_service
 
@@ -65,7 +67,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
             patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm),
             patch.object(chat_service, "SessionLocal", side_effect=AssertionError("使用了开发数据库")),
         ):
-            _, answer = await chat_service.send_message(
+            conversation_id, answer = await chat_service.send_message(
                 "明天下午三点我要学习Agent",
                 request_id=request_id,
                 session_factory=self.session_factory,
@@ -87,6 +89,38 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
              for item in message.get("tool_calls", [])],
             ["create_task"],
         )
+
+        def isolated_db():
+            with self.session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_db] = isolated_db
+        try:
+            with patch.object(chat_service, "SessionLocal", self.session_factory):
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    deleted = await client.delete(f"/chat/conversations/{conversation_id}")
+                    self.assertEqual(deleted.status_code, 204)
+                    self.assertEqual(
+                        (await client.delete(f"/chat/conversations/{conversation_id}")).status_code,
+                        404,
+                    )
+                    replay = await client.post("/chat", json={
+                        "user_text": "明天下午三点我要学习Agent",
+                        "request_id": request_id,
+                    })
+                    self.assertEqual(replay.status_code, 410)
+        finally:
+            app.dependency_overrides.clear()
+
+        with Session(self.engine) as session:
+            self.assertIsNone(session.get(ConversationORM, conversation_id))
+            self.assertEqual(session.scalars(select(ConversationMessageORM)).all(), [])
+            self.assertIsNone(session.get(ChatTurnORM, request_id))
+            self.assertIsNotNone(session.get(DeletedChatRequestORM, request_id))
+            self.assertEqual(len(session.scalars(select(TaskORM)).all()), 1)
+            self.assertEqual(len(session.scalars(select(OperationEventORM)).all()), 1)
 
     async def test_two_http_requests_share_saved_history(self) -> None:
         seen = []

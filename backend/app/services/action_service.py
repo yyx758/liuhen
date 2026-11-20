@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config.clock import now_utc
 from backend.app.models.action import PendingActionORM
-from backend.app.schemas.action import PendingAction
+from backend.app.schemas.action import ActionListItem, PendingAction
 from backend.app.schemas.task import TaskRead, TaskUpdate
 from backend.app.repositories import (
     action_repository,
@@ -21,6 +21,10 @@ from backend.app.services import audit_service
 
 class ActionExecutionError(Exception):
     """A deterministic execution failure that must close the proposal."""
+
+
+class ActionConflictError(Exception):
+    """A sibling proposal changed a field this proposal depends on."""
 
 
 # ========= 通用方法 =========
@@ -123,6 +127,28 @@ def build_updated_snapshot(before: TaskRead, data: TaskUpdate) -> TaskRead:
     })
 
 
+def rebase_batch_update(before: TaskRead, proposed: TaskRead, current: TaskRead) -> TaskRead:
+    """Apply one independent change after another proposal from the same request."""
+    fields = ("title", "priority", "start_at", "duration_minutes", "due_at", "status")
+    changes = {
+        field: getattr(proposed, field)
+        for field in fields if getattr(before, field) != getattr(proposed, field)
+    }
+    if not changes:
+        raise ActionConflictError("提案没有可独立应用的修改")
+    if any(getattr(current, field) != getattr(before, field) for field in changes):
+        raise ActionConflictError("同一字段已变化，请重新创建提案")
+    if {"start_at", "duration_minutes"} & changes.keys() and any(
+        getattr(current, field) != getattr(before, field)
+        for field in ("start_at", "end_at", "duration_minutes")
+    ):
+        raise ActionConflictError("任务排期已变化，请重新创建提案")
+    try:
+        return build_updated_snapshot(current, TaskUpdate.model_validate(changes))
+    except (HTTPException, ValidationError) as exc:
+        raise ActionConflictError("任务已变化，无法安全合并提案") from exc
+
+
 def find_schedule_conflict(
     session: Session, task_id: int, candidate: TaskRead
 ):
@@ -156,10 +182,13 @@ def expire_pending_with_audit(
 
 def save_proposal(session: Session, action: PendingActionORM, now: int) -> PendingAction:
     expire_pending_with_audit(session, now, action.task_id)
-    old_pending = action_repository.list_pending_for_task(session, action.task_id)
-    changed = action_repository.replace_pending_for_task(session, action.task_id)
-    if changed != len(old_pending):
-        raise RuntimeError("提案替换状态与审计记录不一致")
+    old_pending = [
+        old for old in action_repository.list_pending_for_task(session, action.task_id)
+        if action.batch_id is None or old.batch_id != action.batch_id
+    ]
+    for old in old_pending:
+        if not action_repository.transition_status(session, old.id, "pending", "replaced"):
+            raise RuntimeError("提案替换状态与审计记录不一致")
 
     action_repository.insert_action(session, action)
     for old in old_pending:
@@ -221,6 +250,7 @@ def propose_update(
             action_type="update",
             status="pending",
             expected_version=before.version,
+            batch_id=session.info.get("proposal_batch_id") or session.info.get("audit_request_id"),
             before_snapshot=before.model_dump(mode="json"),
             after_snapshot=after.model_dump(mode="json"),
             created_at=now,
@@ -259,6 +289,7 @@ def propose_delete(
             action_type="delete",
             status="pending",
             expected_version=before.version,
+            batch_id=session.info.get("proposal_batch_id") or session.info.get("audit_request_id"),
             before_snapshot=before.model_dump(mode="json"),
             after_snapshot=None,
             created_at=now,
@@ -278,6 +309,32 @@ def expire_due_actions(session: Session) -> int:
         return expire_pending_with_audit(session, now_timestamp())
 
 
+def purge_expired_actions(session: Session) -> int:
+    """Delete elapsed proposals; preserve expiry and deletion audit rows."""
+    with session.begin():
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        now = now_timestamp()
+        due = action_repository.list_expired_actions(
+            session, now, for_update=dialect == "postgresql"
+        )
+        for action in due:
+            if not action_repository.delete_expired_action(session, action.id, now):
+                raise RuntimeError("过期提案清理时状态发生变化")
+            if action.status == "pending":
+                audit_service.record_event(
+                    session, "proposal_expired", action.task_id, action_id=action.id,
+                    from_status="pending", to_status="expired",
+                    reason="提案超过确认期限",
+                )
+            audit_service.record_event(
+                session, "proposal_deleted", action.task_id, action_id=action.id,
+                from_status="expired", reason="系统清理过期提案",
+            )
+        return len(due)
+
+
 # ========= 查询提案 =========
 
 def get_action(
@@ -293,6 +350,50 @@ def get_action(
         raise HTTPException(404, "操作提案不存在")
 
     return to_action_read(action)
+
+
+def list_active_pending(session: Session) -> list[ActionListItem]:
+    return [ActionListItem.model_validate(action.model_dump()) for action in (
+        to_action_read(row) for row in action_repository.list_active_pending(session, now_timestamp())
+    )]
+
+
+def list_for_conversation(session: Session, conversation_id: str) -> list[ActionListItem]:
+    return [ActionListItem.model_validate({
+        **to_action_read(row).model_dump(), "request_id": request_id,
+    }) for row, request_id in action_repository.list_for_conversation(session, conversation_id)]
+
+
+def delete_expired_action(session: Session, action_id: int) -> None:
+    """Remove an elapsed proposal while retaining its append-only audit trail."""
+    with session.begin():
+        if session.get_bind().dialect.name == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+        action = action_repository.get_action_by_id(
+            session, action_id,
+            for_update=session.get_bind().dialect.name == "postgresql",
+        )
+        if action is None:
+            raise HTTPException(404, "操作提案不存在")
+
+        now = now_timestamp()
+        if action.expires_at > now or action.status not in ("pending", "expired"):
+            raise HTTPException(409, "只能删除已过期的待确认提案")
+
+        if not action_repository.delete_expired_action(session, action_id, now):
+            raise HTTPException(409, "提案状态已变化，请刷新后重试")
+
+        if action.status == "pending":
+            audit_service.record_event(
+                session, "proposal_expired", action.task_id, action_id=action_id,
+                from_status="pending", to_status="expired",
+                reason="提案超过确认期限",
+            )
+        audit_service.record_event(
+            session, "proposal_deleted", action.task_id, action_id=action_id,
+            from_status="expired", reason="用户删除过期提案",
+        )
 
 
 # ========= 确认执行 =========
@@ -368,6 +469,21 @@ def confirm_action(
                         ):
                             raise ActionExecutionError("提案快照数据不合法")
 
+                        applied_before = None
+                        expected_version = action.expected_version
+                        if action.batch_id is not None:
+                            current_task = task_repository.get_task_by_id(
+                                session, action.task_id,
+                                for_update=session.get_bind().dialect.name == "postgresql",
+                            )
+                            if current_task is not None:
+                                current = to_task_read(current_task)
+                                if current.version != expected_version:
+                                    original = TaskRead.model_validate(action.before_snapshot)
+                                    after = rebase_batch_update(original, after, current)
+                                    applied_before = current
+                                    expected_version = current.version
+
                         if after.start_at is None:
                             valid_interval = after.end_at is None and after.duration_minutes is None
                         elif after.end_at is None:
@@ -406,8 +522,12 @@ def confirm_action(
                             affected = None
                         else:
                             affected = task_repository.update_if_version(
-                                session, action.task_id, action.expected_version, after
+                                session, action.task_id, expected_version, after
                             )
+                            if affected == 1 and applied_before is not None:
+                                action.before_snapshot = applied_before.model_dump(mode="json")
+                                action.after_snapshot = after.model_dump(mode="json")
+                                action.expected_version = expected_version
                     elif action.action_type == "delete":
                         affected = task_repository.delete_if_version(
                             session, action.task_id, action.expected_version
@@ -435,6 +555,17 @@ def confirm_action(
                 ):
                     raise RuntimeError("无法记录提案冲突状态") from exc
                 error = "时间与其他任务冲突，请重新创建提案"
+                audit_service.record_event(
+                    session, "proposal_conflicted", action.task_id,
+                    action_id=action_id, from_status="pending",
+                    to_status="conflicted", reason=error,
+                )
+            except ActionConflictError as exc:
+                if not action_repository.transition_status(
+                    session, action_id, "executed", "conflicted"
+                ):
+                    raise RuntimeError("无法记录提案冲突状态") from exc
+                error = str(exc)
                 audit_service.record_event(
                     session, "proposal_conflicted", action.task_id,
                     action_id=action_id, from_status="pending",

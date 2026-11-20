@@ -40,3 +40,8 @@ class PendingAction(BaseModel):
 
     # 过期时间
     expires_at: datetime
+
+
+class ActionListItem(PendingAction):
+    # 对话列表通过创建提案的请求 ID 关联消息；普通待处理列表可为空。
+    request_id: str | None = None

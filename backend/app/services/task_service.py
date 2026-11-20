@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 
 from backend.app.models.task import TaskORM
 from backend.app.models.request import TaskCreateRequestORM
-from backend.app.schemas.task import TaskCreate, TaskRead
-from backend.app.repositories import task_repository
+from backend.app.schemas.task import TaskCreate, TaskRead, TaskUpdate
+from backend.app.repositories import action_repository, task_repository
 from backend.app.config.settings import USER_TIMEZONE
 from backend.app.services import audit_service
 
@@ -161,3 +161,84 @@ def get_task(
         )
 
     return to_task_read(task)
+
+
+def _replace_pending_after_manual_change(session: Session, task_id: int, operation: str) -> None:
+    # 手动写入已改变任务版本；旧的 Agent 提案不再适用。
+    from backend.app.services import action_service
+
+    action_service.expire_pending_with_audit(session, action_service.now_timestamp(), task_id)
+    pending = action_repository.list_pending_for_task(session, task_id)
+    if action_repository.replace_pending_for_task(session, task_id) != len(pending):
+        raise RuntimeError("手动操作后提案状态与审计记录不一致")
+    for action in pending:
+        audit_service.record_event(
+            session, "proposal_replaced", task_id, action_id=action.id,
+            from_status="pending", to_status="replaced",
+            reason="任务已被用户手动修改",
+            details={"manual_operation": operation},
+        )
+
+
+def update_task(
+    session: Session, task_id: int, data: TaskUpdate, expected_version: int
+) -> TaskRead:
+    from backend.app.services.action_service import build_updated_snapshot, find_schedule_conflict
+
+    try:
+        with session.begin():
+            dialect = session.get_bind().dialect.name
+            if dialect == "sqlite":
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            task = task_repository.get_task_by_id(
+                session, task_id, for_update=dialect == "postgresql"
+            )
+            if task is None:
+                raise HTTPException(404, "待办不存在")
+            before = to_task_read(task)
+            if before.version != expected_version:
+                raise HTTPException(409, "任务已变化，请刷新后重试")
+            after = build_updated_snapshot(before, data)
+            if before.model_dump(exclude={"version"}) == after.model_dump(exclude={"version"}):
+                raise HTTPException(409, "修改前后没有变化")
+            conflict = find_schedule_conflict(session, task_id, after)
+            if conflict is not None:
+                raise HTTPException(409, f"时间与任务 {conflict.id} 冲突")
+            if task_repository.update_if_version(session, task_id, expected_version, after) != 1:
+                raise HTTPException(409, "任务已变化，请刷新后重试")
+            _replace_pending_after_manual_change(session, task_id, "update")
+            audit_service.record_event(
+                session, "task_updated", task_id,
+                details={
+                    "source": "manual",
+                    "before": before.model_dump(mode="json"),
+                    "after": after.model_dump(mode="json"),
+                },
+            )
+        return after
+    except IntegrityError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "23P01":
+            raise HTTPException(409, "时间与已有任务冲突") from exc
+        raise
+
+
+def delete_task(session: Session, task_id: int, expected_version: int) -> None:
+    with session.begin():
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        task = task_repository.get_task_by_id(
+            session, task_id, for_update=dialect == "postgresql"
+        )
+        if task is None:
+            raise HTTPException(404, "待办不存在")
+        before = to_task_read(task)
+        if before.version != expected_version:
+            raise HTTPException(409, "任务已变化，请刷新后重试")
+        if task_repository.delete_if_version(session, task_id, expected_version) != 1:
+            raise HTTPException(409, "任务已变化，请刷新后重试")
+        _replace_pending_after_manual_change(session, task_id, "delete")
+        audit_service.record_event(
+            session, "task_deleted", task_id,
+            details={"source": "manual", "before": before.model_dump(mode="json")},
+        )

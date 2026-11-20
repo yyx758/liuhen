@@ -8,10 +8,11 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
 from backend.app.models.conversation import ConversationMessageORM, ConversationORM
+from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM
 from backend.app.schemas.conversation import ConversationMessage, ConversationRead
 
 
@@ -56,6 +57,49 @@ def load_history(session: Session, conversation_id: str) -> ConversationRead:
         message_count=conversation.message_count,
         history=[ConversationMessage.model_validate(row.payload) for row in rows],
     )
+
+
+def delete_conversation(session: Session, conversation_id: str) -> None:
+    """Remove chat content; keep only request IDs needed to reject replay."""
+    with session.begin():
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        elif dialect == "postgresql":
+            # acquire_turn takes this lock before starting another turn.
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(3, hashtext(:key))"),
+                {"key": conversation_id},
+            )
+
+        conversation = session.get(
+            ConversationORM, conversation_id,
+            with_for_update=dialect == "postgresql",
+        )
+        if conversation is None:
+            raise HTTPException(404, "会话不存在")
+        active = session.scalar(
+            select(ChatTurnORM.request_id).where(
+                ChatTurnORM.conversation_id == conversation_id,
+                ChatTurnORM.status == "processing",
+            ).limit(1)
+        )
+        if active is not None:
+            raise HTTPException(409, "会话正在处理消息，请稍后删除")
+
+        request_ids = session.scalars(
+            select(ChatTurnORM.request_id).where(ChatTurnORM.conversation_id == conversation_id)
+        ).all()
+        deleted_at = now_timestamp()
+        session.add_all(
+            DeletedChatRequestORM(request_id=request_id, deleted_at=deleted_at)
+            for request_id in request_ids
+        )
+        session.execute(delete(ChatTurnORM).where(ChatTurnORM.conversation_id == conversation_id))
+        session.execute(delete(ConversationMessageORM).where(
+            ConversationMessageORM.conversation_id == conversation_id
+        ))
+        session.delete(conversation)
 
 
 def append_messages(

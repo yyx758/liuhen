@@ -144,15 +144,17 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         }, ensure_ascii=False)
         with Session(self.engine) as session:
             update = json.loads(registry.execute_tool("propose_update", update_args, session))
-        self.assertEqual(update["status"], "pending")
-        self.assertEqual(update["before"]["title"], "学习 Python")
-        self.assertEqual(update["after"]["title"], "复习 Python")
-        self.assertEqual(update["after"]["start_at"], "2030-01-02T16:00:00+08:00")
-        self.assertIsNone(update["after"]["end_at"])
-        self.assertIsNone(update["after"]["duration_minutes"])
+        self.assertEqual(len(update), 2)
+        rename, reschedule = update
+        self.assertEqual([item["status"] for item in update], ["pending", "pending"])
+        self.assertEqual(rename["before"]["title"], "学习 Python")
+        self.assertEqual(rename["after"]["title"], "复习 Python")
+        self.assertEqual(reschedule["after"]["start_at"], "2030-01-02T16:00:00+08:00")
+        self.assertIsNone(reschedule["after"]["end_at"])
+        self.assertIsNone(reschedule["after"]["duration_minutes"])
         with Session(self.engine) as session:
             current_action = json.loads(registry.execute_tool(
-                "get_action", json.dumps({"action_id": update["id"]}), session
+                "get_action", json.dumps({"action_id": rename["id"]}), session
             ))
         self.assertEqual(current_action["status"], "pending")
         self.assertEqual(current_action["before"]["title"], "学习 Python")
@@ -176,16 +178,16 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deletion["status"], "pending")
         self.assertIsNone(deletion["after"])
         with Session(self.engine) as session:
-            replaced_action = json.loads(registry.execute_tool(
-                "get_action", json.dumps({"action_id": update["id"]}), session
-            ))
-        self.assertEqual(replaced_action["status"], "replaced")
+            replaced_actions = [json.loads(registry.execute_tool(
+                "get_action", json.dumps({"action_id": item["id"]}), session
+            )) for item in update]
+        self.assertEqual([item["status"] for item in replaced_actions], ["replaced", "replaced"])
         self.assertIn(
             "任务尚未删除",
             registry.terminal_reply("propose_delete", json.dumps(deletion, ensure_ascii=False)),
         )
 
-    async def test_proposal_stops_agent_and_uses_saved_snapshots(self) -> None:
+    async def test_proposal_summary_uses_saved_snapshots_after_checking_remaining_work(self) -> None:
         with Session(self.engine) as session, session.begin():
             session.add(TaskORM(
                 title="学习 Python",
@@ -202,7 +204,10 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
                 "name": "propose_update",
                 "arguments": json.dumps({
                     "task_id": 1,
-                    "changes": {"title": "复习 Python"},
+                    "changes": {
+                        "title": "复习 Python",
+                        "start_at": "2030-01-02T16:00:00+08:00",
+                    },
                 }, ensure_ascii=False),
             }},
         ]
@@ -210,8 +215,11 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_ask_llm(messages, tools):
             seen.append(list(messages))
-            if len(seen) > 2:
-                self.fail("提案创建后不应再次调用模型")
+            if len(seen) == 3:
+                return LLMResult(
+                    assistant_message={"role": "assistant", "content": "已处理"},
+                    content="已处理",
+                )
             call = calls[len(seen) - 1]
             return LLMResult(
                 assistant_message={"role": "assistant", "tool_calls": [call]},
@@ -220,10 +228,14 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         history = []
         with patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm):
-            answer = await agent_runner.run_agent_loop("把学习 Python 改名为复习 Python", history)
+            answer = await agent_runner.run_agent_loop(
+                "把学习 Python 改名为复习 Python，并改到下午四点", history
+            )
 
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(seen), 3)
         self.assertIn("标题：学习 Python → 复习 Python", answer)
+        self.assertIn("开始时间：2030-01-02 14:00 → 2030-01-02 16:00", answer)
+        self.assertEqual(answer.count("提案 #"), 2)
         self.assertIn("任务尚未修改", answer)
         self.assertEqual(
             [message["role"] for message in history],
@@ -232,9 +244,56 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[-1]["content"], answer)
         with Session(self.engine) as session:
             task = session.get(TaskORM, 1)
-            action = session.scalars(select(PendingActionORM)).one()
+            actions = list(session.scalars(select(PendingActionORM)).all())
             self.assertEqual(task.title, "学习 Python")
-            self.assertEqual(action.status, "pending")
+            self.assertEqual(task.start_at, datetime(2030, 1, 2, 6))
+            self.assertEqual([action.status for action in actions], ["pending", "pending"])
+
+    async def test_multiple_proposal_tool_calls_in_one_reply_are_all_kept(self) -> None:
+        with Session(self.engine) as session, session.begin():
+            session.add(TaskORM(
+                title="旧标题", priority="medium", status="todo", version=1,
+                start_at=datetime(2030, 1, 2, 6),
+            ))
+        calls = [
+            {
+                "id": f"update_{index}", "type": "function",
+                "function": {
+                    "name": "propose_update",
+                    "arguments": json.dumps({
+                        "task_id": 1, "changes": changes,
+                    }, ensure_ascii=False),
+                },
+            }
+            for index, changes in enumerate((
+                {"title": "新标题"},
+                {"start_at": "2030-01-02T16:00:00+08:00"},
+            ))
+        ]
+        seen = []
+
+        async def fake_ask_llm(messages, tools):
+            seen.append(list(messages))
+            if len(seen) == 1:
+                return LLMResult(
+                    assistant_message={"role": "assistant", "tool_calls": calls},
+                    tool_calls=calls,
+                )
+            return LLMResult(
+                assistant_message={"role": "assistant", "content": "已处理"},
+                content="已处理",
+            )
+
+        with patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm):
+            answer = await agent_runner.run_agent_loop("改标题，并改到下午四点", [])
+
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(answer.count("提案 #"), 2)
+        with Session(self.engine) as session:
+            actions = list(session.scalars(select(PendingActionORM)).all())
+            self.assertEqual([action.status for action in actions], ["pending", "pending"])
+            self.assertEqual(actions[0].batch_id, actions[1].batch_id)
+            self.assertEqual(session.get(TaskORM, 1).title, "旧标题")
 
     async def test_conversation_history_is_loaded_for_next_turn(self) -> None:
         seen = []

@@ -4,7 +4,7 @@
 
 留痕是面向个人的任务管理 AI Agent。用户用自然语言描述任务，Agent 负责理解时间、查询任务和发起操作；后端负责校验、持久化、并发控制与操作留痕。项目优先保证结果可靠、过程可追溯，并能通过测评复现和比较版本表现。
 
-当前实现聚焦任务管理。文档管理与检索、偏好、提醒和 Vue 前端仍是后续方向。
+当前后端实现聚焦任务管理。Vue 前端位于 `frontend/app/`，已接入任务、对话、提案和审计 API。文档管理与检索、偏好和提醒仍是后续方向。
 
 ## 已实现的能力
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 任务 | 创建、查询；开始时间和截止时间独立，时长可选；有占用时段的任务参与时间冲突检查 |
 | Agent | 多轮对话；调用创建、查询任务和读取提案工具；修改与删除只生成待确认提案 |
-| 提案 | 独立的查询、确认、取消 API；版本冲突、替换、过期和可判定执行失败有明确状态 |
+| 提案 | 独立的查询、确认、取消 API；前端可按当前待确认或会话读取提案；版本冲突、替换、过期和可判定执行失败有明确状态 |
 | 可靠性 | Chat 请求与直接创建的幂等处理、同一会话并发保护、确认与取消的事务竞争 |
 | 留痕 | 对话与工具过程持久化；业务操作写入只追加的审计日志 |
 | 测评 | 21 条场景、隔离数据库、业务规则评分、LLM 回复裁判和人工抽样校准 |
@@ -31,7 +31,7 @@
                                                     │
                                             PostgreSQL / SQLite
 
-客户端 ── /audit/events ── audit_service ── operation_events
+客户端 ── /audit/events、/audit/events/page、/audit/summary ── audit_service ── operation_events
 ```
 
 `/chat` 的每一轮由 `chat_service` 加载历史、运行 Agent，并持久化消息和工具结果。Agent 工具在 `agent/tool_registry.py` 中显式注册；确认和取消提案只通过独立 API 执行。任务和提案 API 直接进入业务服务。服务层处理校验、事务和审计，仓储层负责数据库读写。
@@ -45,18 +45,20 @@
 | `backend/app/services/` | 任务、提案、对话、幂等请求与审计的业务逻辑 |
 | `backend/app/repositories/` | 任务和提案的数据访问 |
 | `backend/app/models/`、`schemas/` | SQLAlchemy 表模型与 Pydantic 请求／响应模型 |
-| `backend/app/db/`、`config/` | 数据库连接、迁移、时间与模型配置 |
+| `backend/app/db/`、`config/` | 数据库连接、时间与模型配置 |
 | `backend/app/evals/`、`backend/tests/` | 真实模型测评和后端自动化测试 |
 
 ## 核心数据与操作规则
 
 任务至少要有 `start_at`（开始时间）或 `due_at`（截止时间）。截止时间是期限，不由开始时间和时长计算；只有同时给出开始时间与 `duration_minutes` 时，才会计算日程结束时间 `end_at` 并检查时间段冲突。用户没有指定时长时，时长和日程结束时间保持为空。未带时区的任务时间按 UTC+08:00 解释。
 
-Agent 可以直接创建任务。修改、删除会先生成 `pending_actions` 提案，保存任务版本与操作前后快照；用户通过 `POST /actions/{id}/confirm` 或 `/cancel` 作决定。提案有效期为 10 分钟。新提案会替换同一任务尚待确认的旧提案；服务启动后的后台任务每 60 秒清理到期提案，确认时也即时检查有效期。
+Agent 可以直接创建任务；Agent 提议修改、删除时生成 `pending_actions`，保存任务版本与操作前后快照，用户通过 `POST /actions/{id}/confirm` 或 `/cancel` 作决定。同一条对话请求中的独立修改（如改标题和改时间）会生成可分别确认的提案；开始时间、结束时间和时长属于同一项排期修改。确认其中一项后，另一项会在任务未发生同字段冲突时基于最新版本执行。用户在页面手动修改、切换状态或删除任务时，调用 `PATCH /tasks/{id}` 或 `DELETE /tasks/{id}` 直接执行，不生成提案；请求须带当前版本的 `If-Match` 头，版本过旧返回 409。手动变更会将同一任务尚待确认的 Agent 提案标记为已替换。提案有效期为 10 分钟。新一轮请求的提案会替换同一任务尚待确认的旧提案；后台任务每 60 秒物理删除到期提案，确认时也即时检查有效期。`DELETE /actions/{id}` 可提前清理已过期提案，成功返回 204；未到期或已执行的提案返回 409，找不到时返回 404。
 
-提案状态包括 `pending`、`executed`、`cancelled`、`expired`、`replaced`、`conflicted`、`failed`。确认与取消通过事务和条件状态转换争夺同一提案，只有一个请求能生效；确认还会核对任务版本。可判定的执行失败会回滚任务修改并记录 `failed`。创建、提案及其状态变化会写入只追加的 `operation_events`；审计与业务变更在同一事务中提交。
+提案状态包括 `pending`、`executed`、`cancelled`、`expired`、`replaced`、`conflicted`、`failed`。确认与取消通过事务和条件状态转换争夺同一提案，只有一个请求能生效；确认还会核对任务版本。可判定的执行失败会回滚任务修改并记录 `failed`。手动修改、删除分别写入 `task_updated`、`task_deleted`，提案过期删除写入 `proposal_deleted`；这些事件与业务变更在同一事务中提交。
 
 `POST /chat` 要求客户端为每个新意图生成 UUID `request_id`，重试同一意图时复用该值。已完成的重复请求返回先前结果；正在处理的重复请求返回 409。一个会话同一时间只处理一轮，进程中断后的请求可在租约到期后恢复。直接调用 `POST /tasks` 时，使用 UUID 格式的 `Idempotency-Key` 请求头；相同键与相同请求体复用首次创建结果，相同键配不同请求体返回 409。
+
+`DELETE /chat/conversations/{conversation_id}` 删除会话消息和已完成的请求记录；正在处理的会话返回 409。删除后只保留已用请求 ID 的无内容标记，旧请求重试返回 410，不会再次执行工具。任务、提案和操作审计不随会话删除。
 
 ## 本地运行
 
@@ -71,7 +73,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
 在项目根目录的 `.env` 填写 `base_url`（完整的聊天接口地址）、`api_key` 和 `model`。Agent 与测评脚本都直接读取该文件；可选的 `judge_base_url`、`judge_api_key`、`judge_model` 用于独立裁判，未填写时沿用 Agent 模型配置。`.env` 已被 Git 忽略，不要提交真实密钥。
 
-连接 PostgreSQL 时，先安装同步驱动 `python -m pip install "psycopg[binary]"`，并在 `.env` 增加 `database_url=postgresql+psycopg://用户名:URL编码后的密码@127.0.0.1:5432/数据库名`。不配置该项时使用原来的 SQLite 文件。数据库密码包含 `@`、`/` 等字符时须进行 URL 编码。旧 SQLite 数据迁移到**新建空库**的命令是 `python -m backend.app.db.migrate_sqlite_to_postgres`；脚本只读取 SQLite 源文件，目标库非空时会拒绝执行，并在写入后逐表核对数据。原 SQLite 文件不会删除。
+连接 PostgreSQL 时，先安装同步驱动 `python -m pip install "psycopg[binary]"`，并在 `.env` 增加 `database_url=postgresql+psycopg://用户名:URL编码后的密码@127.0.0.1:5432/数据库名`。不配置该项时使用本地 SQLite 文件。数据库密码包含 `@`、`/` 等字符时须进行 URL 编码。现有数据库需具备当前 ORM 定义的字段和约束；启动时不再升级旧表结构。
 
 启动 API：
 
@@ -79,15 +81,17 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -m backend.app.main
 ```
 
-服务默认监听 `http://127.0.0.1:8000`，交互式接口文档位于 `http://127.0.0.1:8000/docs`。本地 SQLite 文件是 `backend/liuhen_dev.db`；启动时会执行适用的数据库迁移、创建缺失表，并启动提案过期清理任务。PostgreSQL 写入测试可使用 `python -m backend.tests.postgres_smoke`，它创建并清理独立的临时测试库。
+服务默认监听 `http://127.0.0.1:8000`，交互式接口文档位于 `http://127.0.0.1:8000/docs`。本地 SQLite 文件是 `backend/liuhen_dev.db`；启动时会创建缺失表，并启动提案过期清理任务。PostgreSQL 写入测试可使用 `python -m backend.tests.postgres_smoke`，它创建并清理独立的临时测试库。
 
 ## API 概览
 
 | 方法与路径 | 用途 |
 | --- | --- |
 | `POST /chat` | 发送一轮自然语言消息；请求包含 `request_id`、`user_text`，后续轮次带上 `conversation_id` |
+| `DELETE /chat/conversations/{conversation_id}` | 删除会话与消息；处理中的会话不可删除，任务与审计保留 |
 | `POST /tasks` | 直接创建任务；请求头包含 `Idempotency-Key` |
 | `GET /tasks`、`GET /tasks/{task_id}` | 查询任务 |
+| `PATCH /tasks/{task_id}`、`DELETE /tasks/{task_id}` | 手动直接修改、删除任务；请求头 `If-Match` 为当前任务版本 |
 | `POST /tasks/{task_id}/proposals/update` | 生成修改提案 |
 | `POST /tasks/{task_id}/proposals/delete` | 生成删除提案 |
 | `GET /actions/{action_id}` | 查询提案及状态 |

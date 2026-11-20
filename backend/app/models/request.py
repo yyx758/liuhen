@@ -27,6 +27,14 @@ class ChatTurnORM(Base):
     answer: Mapped[str | None] = mapped_column(nullable=True)
 
 
+class DeletedChatRequestORM(Base):
+    """Minimal replay guard after the chat turn and its content are removed."""
+    __tablename__ = "deleted_chat_requests"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    deleted_at: Mapped[int] = mapped_column(nullable=False)
+
+
 class TaskCreateRequestORM(Base):
     __tablename__ = "task_create_requests"
 

@@ -1,13 +1,15 @@
 import tempfile
 import unittest
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import URL, create_engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.db.base import Base
-from backend.app.services import conversation_service
+from backend.app.models.conversation import ConversationORM
+from backend.app.services import chat_turn_service, conversation_service
 
 
 class ConversationStorageTests(unittest.TestCase):
@@ -89,6 +91,19 @@ class ConversationStorageTests(unittest.TestCase):
             conversation.to_llm_history(),
             [{"role": "user", "content": "第一轮"}],
         )
+
+    def test_processing_conversation_cannot_be_deleted(self) -> None:
+        with Session(self.engine) as session:
+            conversation_id = conversation_service.create_conversation(session)
+        request_id = str(uuid4())
+        chat_turn_service.acquire_turn(
+            request_id, "正在处理", conversation_id, sessionmaker(bind=self.engine)
+        )
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
+            conversation_service.delete_conversation(session, conversation_id)
+        self.assertEqual(raised.exception.status_code, 409)
+        with Session(self.engine) as session:
+            self.assertIsNotNone(session.get(ConversationORM, conversation_id))
 
 
 if __name__ == "__main__":

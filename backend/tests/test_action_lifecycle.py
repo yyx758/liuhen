@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +11,7 @@ from sqlalchemy import URL, create_engine, select
 from sqlalchemy.orm import Session
 
 from backend.app.db.base import Base
-from backend.app.db.migrations import migrate_action_statuses
+from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.models.action import PendingActionORM
 from backend.app.models.task import TaskORM
 from backend.app.schemas.task import TaskCreate, TaskUpdate
@@ -60,6 +61,48 @@ class ActionLifecycleTests(unittest.TestCase):
             action_service.confirm_action(session, new.id)
         with Session(self.engine) as session:
             self.assertEqual(session.get(TaskORM, task.id).title, "新修改")
+
+    def test_one_request_creates_independent_proposals_confirmed_in_either_order(self) -> None:
+        registry = ToolRegistry()
+        for order in ((0, 1), (1, 0)):
+            with self.subTest(order=order):
+                task = self.create_task()
+                arguments = json.dumps({
+                    "task_id": task.id,
+                    "changes": {
+                        "title": "新标题",
+                        "start_at": "2030-01-03T15:00:00+08:00",
+                    },
+                }, ensure_ascii=False)
+                with Session(self.engine) as session:
+                    session.info["audit_request_id"] = f"request-{task.id}"
+                    proposals = json.loads(registry.execute_tool(
+                        "propose_update", arguments, session
+                    ))
+                self.assertEqual(len(proposals), 2)
+                self.assertNotEqual(proposals[0]["id"], proposals[1]["id"])
+                self.assertEqual([item["status"] for item in proposals], ["pending", "pending"])
+                with Session(self.engine) as session:
+                    saved = [session.get(PendingActionORM, item["id"]) for item in proposals]
+                    self.assertEqual(saved[0].batch_id, saved[1].batch_id)
+                    self.assertIsNotNone(saved[0].batch_id)
+
+                for index in order:
+                    with Session(self.engine) as session:
+                        confirmed = action_service.confirm_action(
+                            session, proposals[index]["id"]
+                        )
+                        self.assertEqual(confirmed.status, "executed")
+
+                with Session(self.engine) as session:
+                    current = session.get(TaskORM, task.id)
+                    self.assertEqual(current.title, "新标题")
+                    self.assertEqual(current.start_at.isoformat(), "2030-01-03T07:00:00")
+                    self.assertEqual(current.version, 3)
+                    self.assertEqual(
+                        [session.get(PendingActionORM, item["id"]).status for item in proposals],
+                        ["executed", "executed"],
+                    )
 
     def test_expired_proposal_is_rejected_and_swept(self) -> None:
         task = self.create_task()
@@ -211,48 +254,3 @@ class ActionLifecycleTests(unittest.TestCase):
             else:
                 self.assertEqual(final_status, "cancelled")
                 self.assertEqual((current.title, current.version), ("原任务", 1))
-
-
-class ActionMigrationTests(unittest.TestCase):
-    def test_old_sqlite_constraint_is_migrated_without_losing_actions(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            engine = create_engine(URL.create(
-                "sqlite+pysqlite", database=str(Path(directory) / "old.db")
-            ))
-            try:
-                with engine.begin() as connection:
-                    connection.exec_driver_sql("""
-                        CREATE TABLE pending_actions (
-                            id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL,
-                            action_type VARCHAR(10) NOT NULL,
-                            status VARCHAR(16) NOT NULL,
-                            expected_version INTEGER NOT NULL,
-                            before_snapshot JSON NOT NULL, after_snapshot JSON,
-                            created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-                            CONSTRAINT ck_action_type CHECK (action_type IN ('update', 'delete')),
-                            CONSTRAINT ck_action_status CHECK (status IN (
-                                'pending', 'executed', 'cancelled', 'expired', 'conflicted'
-                            ))
-                        )
-                    """)
-                    connection.exec_driver_sql(
-                        "CREATE INDEX ix_pending_actions_task_id ON pending_actions (task_id)"
-                    )
-                    connection.exec_driver_sql("""
-                        INSERT INTO pending_actions VALUES
-                        (7, 3, 'delete', 'pending', 1, '{}', NULL, 1, 100)
-                    """)
-                migrate_action_statuses(engine)
-                migrate_action_statuses(engine)
-                with engine.begin() as connection:
-                    self.assertEqual(connection.exec_driver_sql(
-                        "SELECT task_id, status FROM pending_actions WHERE id = 7"
-                    ).one(), (3, "pending"))
-                    connection.exec_driver_sql(
-                        "UPDATE pending_actions SET status = 'replaced' WHERE id = 7"
-                    )
-                    self.assertEqual(connection.exec_driver_sql(
-                        "SELECT status FROM pending_actions WHERE id = 7"
-                    ).scalar_one(), "replaced")
-            finally:
-                engine.dispose()

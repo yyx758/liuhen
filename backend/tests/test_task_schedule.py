@@ -14,7 +14,6 @@ from sqlalchemy.pool import StaticPool
 
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.db.base import Base
-from backend.app.db.migrations import migrate_task_time_range
 from backend.app.models.task import TaskORM
 from backend.app.services.task_service import list_tasks
 
@@ -164,45 +163,6 @@ class TaskScheduleTests(unittest.TestCase):
                 self.assertCountEqual(outcomes, ["created", "conflict"])
             finally:
                 engine.dispose()
-
-    def test_old_task_constraint_is_migrated_without_losing_rows(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            engine = create_engine(URL.create(
-                "sqlite+pysqlite", database=str(Path(directory) / "old.db")
-            ))
-            try:
-                with engine.begin() as connection:
-                    connection.exec_driver_sql("""
-                        CREATE TABLE tasks (
-                            id INTEGER PRIMARY KEY, title VARCHAR(100) NOT NULL,
-                            priority VARCHAR(20) NOT NULL, due_at DATETIME,
-                            start_at DATETIME, end_at DATETIME,
-                            status VARCHAR(20) NOT NULL, version INTEGER NOT NULL,
-                            CONSTRAINT ck_task_time_range CHECK (
-                                (start_at IS NULL AND end_at IS NULL) OR
-                                (start_at IS NOT NULL AND end_at IS NOT NULL AND end_at > start_at)
-                            )
-                        )
-                    """)
-                    connection.exec_driver_sql("""
-                        INSERT INTO tasks VALUES
-                        (7, '旧任务', 'medium', NULL, '2030-01-02 06:00:00',
-                         '2030-01-02 07:00:00', 'todo', 1)
-                    """)
-                migrate_task_time_range(engine)
-                migrate_task_time_range(engine)
-                with engine.begin() as connection:
-                    self.assertEqual(connection.exec_driver_sql(
-                        "SELECT title FROM tasks WHERE id = 7"
-                    ).scalar_one(), "旧任务")
-                    connection.exec_driver_sql("""
-                        INSERT INTO tasks VALUES
-                        (8, '只有开始', 'medium', NULL, '2030-01-02 08:00:00',
-                         NULL, 'todo', 1)
-                    """)
-            finally:
-                engine.dispose()
-
 
 if __name__ == "__main__":
     unittest.main()

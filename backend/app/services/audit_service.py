@@ -1,13 +1,14 @@
 """Add an audit row to the caller's transaction; never commit independently."""
 
 from datetime import datetime, timezone
+from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.config.clock import now_utc
 from backend.app.models.operation_event import OperationEventORM
-from backend.app.schemas.operation_event import OperationEventRead
+from backend.app.schemas.operation_event import AuditEventPageRead, AuditSummaryRead, OperationEventRead
 
 
 def record_event(
@@ -37,22 +38,50 @@ def record_event(
     ))
 
 
-def list_events(
-    session: Session,
+def _event_conditions(
     *,
     task_id: int | None = None,
     action_id: int | None = None,
-    before_id: int | None = None,
-    limit: int = 50,
-) -> list[OperationEventRead]:
-    stmt = select(OperationEventORM)
+    request_id: str | None = None,
+    since: int | None = None,
+    category: Literal["all", "failed", "cancelled"] = "all",
+):
+    conditions = []
     if task_id is not None:
-        stmt = stmt.where(OperationEventORM.task_id == task_id)
+        conditions.append(OperationEventORM.task_id == task_id)
     if action_id is not None:
-        stmt = stmt.where(OperationEventORM.action_id == action_id)
-    if before_id is not None:
-        stmt = stmt.where(OperationEventORM.id < before_id)
-    stmt = stmt.order_by(OperationEventORM.id.desc()).limit(limit)
+        conditions.append(OperationEventORM.action_id == action_id)
+    if request_id is not None:
+        conditions.append(OperationEventORM.request_id == request_id)
+    if since is not None:
+        conditions.append(OperationEventORM.created_at >= since)
+    if category == "failed":
+        conditions.append(OperationEventORM.event_type.in_(("proposal_failed", "proposal_conflicted")))
+    elif category == "cancelled":
+        conditions.append(OperationEventORM.event_type == "proposal_cancelled")
+    return conditions
+
+
+def _read_rows(session: Session, rows: list[OperationEventORM]) -> list[OperationEventRead]:
+
+    def title_from(details: dict | None) -> str | None:
+        for key in ("task", "before", "after"):
+            snapshot = (details or {}).get(key)
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("title"), str):
+                return snapshot["title"]
+        return None
+
+    missing_action_ids = {
+        row.action_id for row in rows
+        if row.action_id is not None and title_from(row.details) is None
+    }
+    proposal_titles = {}
+    if missing_action_ids:
+        created = session.scalars(select(OperationEventORM).where(
+            OperationEventORM.action_id.in_(missing_action_ids),
+            OperationEventORM.event_type == "proposal_created",
+        )).all()
+        proposal_titles = {row.action_id: title_from(row.details) for row in created}
     return [
         OperationEventRead(
             id=row.id,
@@ -67,6 +96,104 @@ def list_events(
             reason=row.reason,
             details=row.details,
             created_at=datetime.fromtimestamp(row.created_at, timezone.utc),
+            subject_title=title_from(row.details) or proposal_titles.get(row.action_id),
         )
-        for row in session.scalars(stmt)
+        for row in rows
     ]
+
+
+def list_events(
+    session: Session,
+    *,
+    task_id: int | None = None,
+    action_id: int | None = None,
+    before_id: int | None = None,
+    request_id: str | None = None,
+    since: int | None = None,
+    category: Literal["all", "failed", "cancelled"] = "all",
+    limit: int = 50,
+) -> list[OperationEventRead]:
+    conditions = _event_conditions(
+        task_id=task_id, action_id=action_id, request_id=request_id,
+        since=since, category=category,
+    )
+    if before_id is not None:
+        conditions.append(OperationEventORM.id < before_id)
+    rows = session.scalars(
+        select(OperationEventORM).where(*conditions)
+        .order_by(OperationEventORM.id.desc()).limit(limit)
+    ).all()
+    return _read_rows(session, list(rows))
+
+
+def page_events(
+    session: Session,
+    *,
+    page: int,
+    page_size: int,
+    task_id: int | None = None,
+    action_id: int | None = None,
+    request_id: str | None = None,
+    since: int | None = None,
+    category: Literal["all", "failed", "cancelled"] = "all",
+    anchor_id: int | None = None,
+) -> AuditEventPageRead:
+    conditions = _event_conditions(
+        task_id=task_id, action_id=action_id, request_id=request_id,
+        since=since, category=category,
+    )
+    if anchor_id is None:
+        anchor_id = session.scalar(
+            select(func.max(OperationEventORM.id)).where(*conditions)
+        )
+    if anchor_id is not None:
+        conditions.append(OperationEventORM.id <= anchor_id)
+    total = session.scalar(
+        select(func.count(OperationEventORM.id)).where(*conditions)
+    ) or 0
+    rows = session.scalars(
+        select(OperationEventORM).where(*conditions)
+        .order_by(OperationEventORM.id.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return AuditEventPageRead(
+        items=_read_rows(session, list(rows)),
+        page=page,
+        page_size=page_size,
+        total=total,
+        total_pages=(total + page_size - 1) // page_size,
+        anchor_id=anchor_id,
+    )
+
+
+def summary(session: Session, *, since: int | None = None) -> AuditSummaryRead:
+    conditions = [OperationEventORM.created_at >= since] if since is not None else []
+    counts = dict(session.execute(
+        select(OperationEventORM.event_type, func.count())
+        .where(*conditions)
+        .group_by(OperationEventORM.event_type)
+    ).all())
+    requests = session.scalar(
+        select(func.count(func.distinct(OperationEventORM.request_id))).where(*conditions)
+    ) or 0
+    return AuditSummaryRead(
+        total=sum(counts.values()),
+        proposals=counts.get("proposal_created", 0),
+        executed=counts.get("proposal_executed", 0),
+        cancelled=counts.get("proposal_cancelled", 0),
+        expired=counts.get("proposal_expired", 0),
+        failures=counts.get("proposal_failed", 0) + counts.get("proposal_conflicted", 0),
+        requests=requests,
+    )
+
+
+def agent_created_task_ids(session: Session, task_ids: list[int]) -> set[int]:
+    if not task_ids:
+        return set()
+    return set(session.scalars(
+        select(OperationEventORM.task_id).where(
+            OperationEventORM.task_id.in_(task_ids),
+            OperationEventORM.event_type == "task_created",
+            OperationEventORM.conversation_id.is_not(None),
+        )
+    ).all())

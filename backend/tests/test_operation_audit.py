@@ -186,6 +186,80 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
             action_service.cancel_action(session, expired_on_cancel.id)
         self.assertEqual(self.events(expired_on_cancel.id)[-1].event_type, "proposal_expired")
 
+    def test_delete_expired_proposal_preserves_audit_and_rolls_back_on_failure(self) -> None:
+        task = self.create()
+        action = self.propose_update(task.id, "过期后清理")
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as early:
+            action_service.delete_expired_action(session, action.id)
+        self.assertEqual(early.exception.status_code, 409)
+
+        with Session(self.engine) as session, session.begin():
+            session.get(PendingActionORM, action.id).expires_at = 0
+        with patch.object(audit_service, "record_event", side_effect=RuntimeError("审计写入失败")):
+            with Session(self.engine) as session, self.assertRaises(RuntimeError):
+                action_service.delete_expired_action(session, action.id)
+        with Session(self.engine) as session:
+            self.assertIsNotNone(session.get(PendingActionORM, action.id))
+
+        with Session(self.engine) as session:
+            action_service.delete_expired_action(session, action.id)
+        with Session(self.engine) as session:
+            self.assertIsNone(session.get(PendingActionORM, action.id))
+            self.assertIsNotNone(session.get(TaskORM, task.id))
+        self.assertEqual(
+            [row.event_type for row in self.events(action.id)],
+            ["proposal_created", "proposal_expired", "proposal_deleted"],
+        )
+        with Session(self.engine) as session, self.assertRaises(HTTPException) as repeated:
+            action_service.delete_expired_action(session, action.id)
+        self.assertEqual(repeated.exception.status_code, 404)
+
+    async def test_delete_expired_proposal_http_endpoint(self) -> None:
+        task = self.create()
+        action = self.propose_update(task.id, "通过接口删除")
+
+        def isolated_db():
+            with self.session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_db] = isolated_db
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                self.assertEqual((await client.delete(f"/actions/{action.id}")).status_code, 409)
+                with Session(self.engine) as session, session.begin():
+                    session.get(PendingActionORM, action.id).expires_at = 0
+                response = await client.delete(f"/actions/{action.id}")
+                self.assertEqual(response.status_code, 204)
+                self.assertEqual((await client.get(f"/actions/{action.id}")).status_code, 404)
+                audit = await client.get("/audit/events", params={"action_id": action.id})
+                self.assertEqual(audit.json()[0]["event_type"], "proposal_deleted")
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_background_purge_only_removes_elapsed_proposals(self) -> None:
+        first = self.create(start="2030-01-02T14:00:00+08:00")
+        second = self.create(start="2030-01-03T14:00:00+08:00")
+        third = self.create(start="2030-01-04T14:00:00+08:00")
+        pending_expired = self.propose_update(first.id, "待清理")
+        marked_expired = self.propose_update(second.id, "已标记过期")
+        active = self.propose_update(third.id, "仍有效")
+        with Session(self.engine) as session, session.begin():
+            session.get(PendingActionORM, marked_expired.id).expires_at = 0
+        with Session(self.engine) as session:
+            self.assertEqual(action_service.expire_due_actions(session), 1)
+        with Session(self.engine) as session, session.begin():
+            session.get(PendingActionORM, pending_expired.id).expires_at = 0
+        with Session(self.engine) as session:
+            self.assertEqual(action_service.purge_expired_actions(session), 2)
+        with Session(self.engine) as session:
+            self.assertEqual(action_service.purge_expired_actions(session), 0)
+            self.assertIsNone(session.get(PendingActionORM, pending_expired.id))
+            self.assertIsNone(session.get(PendingActionORM, marked_expired.id))
+            self.assertEqual(session.get(PendingActionORM, active.id).status, "pending")
+        self.assertEqual(self.events(marked_expired.id)[-1].event_type, "proposal_deleted")
+
     async def test_audit_read_endpoint_filters_events(self) -> None:
         task = self.create()
         action = self.propose_update(task.id, "待确认")

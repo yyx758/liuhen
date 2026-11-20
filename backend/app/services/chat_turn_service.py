@@ -9,7 +9,7 @@ from sqlalchemy import select, text
 
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.models.conversation import ConversationORM
-from backend.app.models.request import ChatTurnORM
+from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM
 from backend.app.services import conversation_service
 
 
@@ -49,6 +49,8 @@ def acquire_turn(request_id: str, user_text: str, conversation_id: str | None, s
                     text("SELECT pg_advisory_xact_lock(3, hashtext(:key))"),
                     {"key": conversation_id},
                 )
+        if session.get(DeletedChatRequestORM, request_id) is not None:
+            raise HTTPException(410, "该请求所属的会话已删除，请开始新对话")
         turn = session.get(ChatTurnORM, request_id)
         if turn is not None:
             if turn.user_text != user_text or (

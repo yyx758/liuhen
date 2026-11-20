@@ -1,14 +1,14 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Response, status
 from uuid import UUID
 from sqlalchemy.orm import Session
 
 from backend.app.db.session import get_db
-from backend.app.schemas.task import TaskCreate, TaskRead, TaskUpdate
+from backend.app.schemas.task import TaskCreate, TaskListItem, TaskRead, TaskUpdate
 from backend.app.schemas.action import PendingAction
-from backend.app.services import task_service, action_service
+from backend.app.services import task_service, action_service, audit_service
 
 
 router = APIRouter(
@@ -37,13 +37,17 @@ def create_task(
 # 查询全部待办
 @router.get(
     "",
-    response_model=list[TaskRead]
+    response_model=list[TaskListItem]
 )
 def list_tasks(
     session: DbSession
-) -> list[TaskRead]:
+) -> list[TaskListItem]:
 
-    return task_service.list_tasks(session)
+    tasks = task_service.list_tasks(session)
+    agent_ids = audit_service.agent_created_task_ids(session, [task.id for task in tasks])
+    return [TaskListItem.model_validate({
+        **task.model_dump(), "created_by_agent": task.id in agent_ids,
+    }) for task in tasks]
 
 
 # 按 ID 查询
@@ -57,6 +61,26 @@ def get_task(
 ) -> TaskRead:
 
     return task_service.get_task(task_id, session)
+
+
+@router.patch("/{task_id}", response_model=TaskRead)
+def update_task(
+    task_id: int,
+    data: TaskUpdate,
+    session: DbSession,
+    expected_version: int = Header(alias="If-Match", gt=0),
+) -> TaskRead:
+    return task_service.update_task(session, task_id, data, expected_version)
+
+
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(
+    task_id: int,
+    session: DbSession,
+    expected_version: int = Header(alias="If-Match", gt=0),
+) -> Response:
+    task_service.delete_task(session, task_id, expected_version)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # 创建修改提案

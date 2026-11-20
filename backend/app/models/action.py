@@ -40,6 +40,9 @@ class PendingActionORM(Base):
         nullable=False
     )
 
+    # 同一轮 Agent 请求中的独立提案可以同时待确认。
+    batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
     # 操作前快照
     before_snapshot: Mapped[dict] = mapped_column(
         JSON,

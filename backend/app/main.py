@@ -8,11 +8,6 @@ from fastapi import FastAPI
 
 from backend.app.api import tasks, actions, chat, audit
 from backend.app.db.base import Base
-from backend.app.db.migrations import (
-    migrate_action_statuses,
-    migrate_postgres_schedule_exclusion,
-    migrate_task_time_range,
-)
 from backend.app.db.session import engine
 from backend.app.db.session import SessionLocal
 from backend.app.services import action_service
@@ -21,7 +16,7 @@ from backend.app.services import action_service
 from backend.app.models.task import TaskORM
 from backend.app.models.action import PendingActionORM
 from backend.app.models.conversation import ConversationORM, ConversationMessageORM
-from backend.app.models.request import ChatTurnORM, TaskCreateRequestORM
+from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM, TaskCreateRequestORM
 from backend.app.models.operation_event import OperationEventORM
 
 
@@ -30,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def expire_due_proposals() -> int:
     with SessionLocal() as session:
-        return action_service.expire_due_actions(session)
+        return action_service.purge_expired_actions(session)
 
 
 async def proposal_expiry_loop() -> None:
@@ -46,10 +41,7 @@ async def proposal_expiry_loop() -> None:
 async def lifespan(app: FastAPI):
 
     # 本地学习阶段自动创建缺失的表
-    migrate_action_statuses(engine)
-    migrate_task_time_range(engine)
     Base.metadata.create_all(bind=engine)
-    migrate_postgres_schedule_exclusion(engine)
     expiry_task = asyncio.create_task(proposal_expiry_loop())
     try:
         yield

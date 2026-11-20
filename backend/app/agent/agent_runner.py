@@ -2,6 +2,7 @@ import asyncio
 import json
 from datetime import datetime
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from fastapi import HTTPException
 
@@ -17,9 +18,11 @@ def execute_one_tool(
     registry: ToolRegistry,
     name: str,
     arguments: str,
+    proposal_batch_id: str,
 ) -> str:
     # Session 在工作线程中创建、使用和关闭
     with SessionLocal() as session:
+        session.info["proposal_batch_id"] = proposal_batch_id
         return registry.execute_tool(name, arguments, session)
 
 
@@ -67,7 +70,12 @@ async def run_agent_loop(
                 "时长、截止时间和完成状态；用户说出的时间由你转换为完整本地日期时间。"
                 "只改开始时间时保持原时长，只改时长时保持开始时间，只改结束时间时据此计算时长。"
                 "用户同时给出结束时间和时长时必须一致；时间或目标不明确就追问。"
-                "一次只生成一个提案；生成后本轮立即结束，由服务端展示提案快照。"
+                "一条消息可能有多项独立要求，逐项完成，不要遗漏。"
+                "同一任务的标题、排期、截止时间、优先级或状态等独立修改要分别生成提案；"
+                "开始时间、结束时间和时长作为同一项排期修改。"
+                "可以一次提交多个工具调用；本轮结束时由服务端汇总全部提案。"
+                "已经生成的提案不要重复提交；每次工具返回后核对原始要求是否还有未处理的部分。"
+                "若部分要求无法处理，最终回复以“未完成：”开头说明具体原因。"
                 "用户询问提案状态或确认、取消结果时，已知提案 ID 则用 get_action 查询最新状态；"
                 "需要核实任务当前内容时用 get_task，不凭历史记录猜测当前结果。"
                 "提案状态若为 conflicted，工具未提供具体原因时不要猜测冲突原因。"
@@ -96,11 +104,45 @@ async def run_agent_loop(
         return current_turn[-1].get("content") or ""
 
     tool_call_max = 8
+    proposal_batch_id = str(uuid4())
     tool_call_count = sum(
         len(message.get("tool_calls") or []) for message in current_turn
         if message["role"] == "assistant"
     )
     round_count = sum(message["role"] == "assistant" for message in current_turn)
+
+    def proposal_results() -> tuple[list[str], list[str]]:
+        results = {
+            message["tool_call_id"]: message["content"]
+            for message in current_turn if message["role"] == "tool"
+        }
+        replies, failures = [], []
+        for message in current_turn:
+            for call in message.get("tool_calls") or []:
+                name = call["function"]["name"]
+                output = results.get(call["id"])
+                if not registry.is_terminal(name) or output is None:
+                    continue
+                try:
+                    parsed = json.loads(output)
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict) and parsed.get("ok") is False:
+                    failures.append(str(parsed.get("error") or "提案生成失败"))
+                else:
+                    replies.append(registry.terminal_reply(name, output))
+        return replies, failures
+
+    def final_reply(model_content: str) -> str:
+        replies, failures = proposal_results()
+        if not replies:
+            return model_content
+        summary = "\n\n".join(replies)
+        if failures:
+            summary += "\n\n未完成的要求：" + "；".join(failures)
+        if model_content.startswith("未完成："):
+            summary += "\n\n" + model_content
+        return summary
 
     while round_count < 5:
         # 恢复时先执行已保存、尚无结果的工具调用。
@@ -126,7 +168,7 @@ async def run_agent_loop(
                 try:
                     if durable_tool is None:
                         tool_output = await asyncio.to_thread(
-                            execute_one_tool, registry, name, arguments
+                            execute_one_tool, registry, name, arguments, proposal_batch_id
                         )
                     else:
                         tool_output = await durable_tool(registry, name, arguments, call["id"])
@@ -141,30 +183,18 @@ async def run_agent_loop(
                     "role": "tool", "tool_call_id": call["id"], "content": tool_output,
                 }, already_persisted=tool_succeeded and durable_tool is not None)
                 last_results[call["id"]] = tool_output
-                if tool_succeeded and registry.is_terminal(name):
-                    reply = registry.terminal_reply(name, tool_output)
-                    await record({"role": "assistant", "content": reply})
-                    return reply
-
-            # 终止工具可能已提交，但服务在保存最终回复前中断。
-            if len(last_calls) == 1:
-                name = last_calls[0]["function"]["name"]
-                output = last_results.get(last_calls[0]["id"])
-                if registry.is_terminal(name) and output is not None:
-                    try:
-                        failed = json.loads(output).get("ok") is False
-                    except (ValueError, TypeError, AttributeError):
-                        failed = False
-                    if not failed:
-                        reply = registry.terminal_reply(name, output)
-                        await record({"role": "assistant", "content": reply})
-                        return reply
-
-        result = await ask_llm(messages, llm_tools)
+        replies, _ = proposal_results()
+        continuation = ({
+            "role": "system",
+            "content": "请核对本轮用户原话和已返回的提案。还有未处理的独立要求就继续调用工具；"
+                       "全部处理完毕就直接回复。不要重复创建已有提案。"
+        } if replies else None)
+        result = await ask_llm([*messages, continuation] if continuation else messages, llm_tools)
         round_count += 1
         if not result.tool_calls:
-            await record({"role": "assistant", "content": result.content})
-            return result.content
+            reply = final_reply(result.content)
+            await record({"role": "assistant", "content": reply})
+            return reply
         if round_count == 5:
             raise ValueError("最后一轮不允许再调用工具")
         if tool_call_count + len(result.tool_calls) > tool_call_max:
@@ -177,17 +207,13 @@ async def run_agent_loop(
         }
         if any(not call_id for call_id in call_ids) or len(set(call_ids)) != len(call_ids) or previous_ids.intersection(call_ids):
             raise ValueError("模型返回了缺失或重复的工具调用 ID")
-        if len(result.tool_calls) > 1 and any(
-            registry.is_terminal(call["function"]["name"])
-            for call in result.tool_calls
-        ):
-            reply = "一次只能生成一个修改或删除提案，请分开提出。"
-            await record({"role": "assistant", "content": reply})
-            return reply
-
         tool_call_count += len(result.tool_calls)
         await record(result.assistant_message)
 
+    if proposal_results()[0]:
+        reply = final_reply("")
+        await record({"role": "assistant", "content": reply})
+        return reply
     raise RuntimeError("模型调用轮数已达上限")
 
 
