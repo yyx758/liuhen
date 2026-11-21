@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, suppress
 import uvicorn
 from fastapi import FastAPI
 
-from backend.app.api import auth, tasks, actions, chat, audit
+from backend.app.api import admin, auth, tasks, actions, chat, audit
 from backend.app.api.security import check_origin
 from backend.app.db.migrations import ensure_schema_current
 from backend.app.db.session import engine
@@ -61,6 +61,7 @@ app.middleware("http")(check_origin)
 
 # 注册路由模块
 app.include_router(auth.router)
+app.include_router(admin.router)
 app.include_router(tasks.router)
 app.include_router(actions.router)
 app.include_router(chat.router)

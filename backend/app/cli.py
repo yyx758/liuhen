@@ -42,10 +42,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(f"已创建管理员 {user.username}（ID {user.id}）")
             elif args.command == "promote":
-                account_service.promote_to_admin(session, username=args.username)
+                account_service.promote_to_admin(
+                    session, user_id=account_service.user_id_by_username(session, args.username),
+                )
                 print(f"已将 {args.username} 提升为管理员")
             else:
-                temporary = account_service.reset_password(session, username=args.username)
+                temporary = account_service.reset_password(
+                    session, target_id=account_service.user_id_by_username(session, args.username), actor_id=None,
+                )
                 print(f"临时密码（只显示这一次，对方登录后须立即修改）：{temporary}")
     except HTTPException as exc:
         print(exc.detail, file=sys.stderr)

@@ -156,7 +156,9 @@ class AuthTests(unittest.TestCase):
         self.add_user("alice")
         self.login(self.client, "alice")
         with Session(self.engine) as session:
-            temporary = account_service.reset_password(session, username="Alice")
+            temporary = account_service.reset_password(
+                session, target_id=account_service.user_id_by_username(session, "Alice"), actor_id=None,
+            )
         self.assertEqual(self.client.get("/auth/me").status_code, 401)
 
         self.login(self.client, "alice", temporary)
@@ -242,8 +244,8 @@ class AccountServiceTests(unittest.TestCase):
             ({"username": "ab", "password": "long-enough-1"}, "用户名须为 3–32 位小写字母、数字或下划线"),
             ({"username": "new_one", "password": "short"}, "密码长度须为 8–128 位"),
             ({"username": "new_one_1", "password": "new_one_1"}, "密码不能与用户名相同"),
-            ({"username": "OWNER", "password": "long-enough-1"}, "用户名或邮箱已被使用"),
-            ({"username": "new_one", "password": "long-enough-1", "email": "owner@example.com"}, "用户名或邮箱已被使用"),
+            ({"username": "OWNER", "password": "long-enough-1"}, "用户名已被占用"),
+            ({"username": "new_one", "password": "long-enough-1", "email": "owner@example.com"}, "邮箱已被使用"),
             ({"username": "new_one", "password": "long-enough-1", "email": "not-an-email"}, "邮箱格式不正确"),
         ):
             with self.subTest(kwargs=kwargs), Session(self.engine) as session:
@@ -253,12 +255,15 @@ class AccountServiceTests(unittest.TestCase):
 
     def test_promote_requires_active_account(self) -> None:
         with Session(self.engine) as session, session.begin():
-            session.add(UserORM(username="waiting", password_hash="!", status="pending"))
-            session.add(UserORM(username="member", password_hash="!", status="active"))
+            waiting = UserORM(username="waiting", password_hash="!", status="pending")
+            member = UserORM(username="member", password_hash="!", status="active")
+            session.add_all([waiting, member])
+            session.flush()
+            waiting_id, member_id = waiting.id, member.id
         with Session(self.engine) as session, self.assertRaises(HTTPException):
-            account_service.promote_to_admin(session, username="waiting")
+            account_service.promote_to_admin(session, user_id=waiting_id)
         with Session(self.engine) as session:
-            account_service.promote_to_admin(session, username="member")
+            account_service.promote_to_admin(session, user_id=member_id)
         with Session(self.engine) as session:
             self.assertEqual(session.scalar(select(UserORM.role).where(UserORM.username == "member")), "admin")
 

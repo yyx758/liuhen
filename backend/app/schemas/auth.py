@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -22,3 +24,4 @@ class UserRead(BaseModel):
     email: str | None
     role: str
     must_change_password: bool
+    created_at: datetime

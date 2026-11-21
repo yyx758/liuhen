@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.api import actions, audit, chat, tasks
-from backend.app.api.deps import current_session_user, current_user_id
+from backend.app.api.deps import current_session_user, current_user, current_user_id, require_admin
 from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.db.session import get_db
 from backend.app.main import app as main_app
@@ -193,7 +193,9 @@ class UserIsolationTests(unittest.TestCase):
 
 class RouteProtectionTests(unittest.TestCase):
     # 不需要登录的接口；新增公开接口必须在这里显式登记。
-    PUBLIC = {("POST", "/auth/login"), ("POST", "/auth/logout")}
+    PUBLIC = {("POST", "/auth/login"), ("POST", "/auth/logout"), ("POST", "/auth/register")}
+    # 强制改密状态下仍可访问的接口；其余 /auth/* 也必须拒绝待改密状态。
+    PASSWORD_CHANGE_ALLOWED = {("GET", "/auth/me"), ("POST", "/auth/password")}
 
     def test_every_route_requires_login(self) -> None:
         def depends_on(dependant, target) -> bool:
@@ -206,8 +208,15 @@ class RouteProtectionTests(unittest.TestCase):
             for method in route.methods:
                 if (method, route.path) in self.PUBLIC:
                     continue
-                # 业务接口还必须拒绝"待改密"状态，所以要求依赖 current_user_id。
-                target = current_session_user if route.path.startswith("/auth/") else current_user_id
+                # 业务接口还必须拒绝"待改密"状态，所以要求依赖 current_user_id；管理接口要求管理员。
+                if (method, route.path) in self.PASSWORD_CHANGE_ALLOWED:
+                    target = current_session_user
+                elif route.path.startswith("/auth/"):
+                    target = current_user
+                elif route.path.startswith("/admin/"):
+                    target = require_admin
+                else:
+                    target = current_user_id
                 if not depends_on(route.dependant, target):
                     problems.append(f"{method} {route.path}")
         self.assertEqual(problems, [])

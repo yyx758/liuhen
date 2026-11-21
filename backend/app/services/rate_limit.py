@@ -56,14 +56,16 @@ class FailureLock:
             del self._locked_until[key]
             return False
 
-    def record_failure(self, key: str) -> None:
+    def record_failure(self, key: str) -> bool:
+        """记录一次失败；这次失败导致锁定时返回 True。"""
         with self._lock:
             count = self._failures.get(key, 0) + 1
             if count >= self.max_failures:
                 self._locked_until[key] = self.clock() + self.lock_seconds
                 self._failures.pop(key, None)
-            else:
-                self._failures[key] = count
+                return True
+            self._failures[key] = count
+            return False
 
     def clear(self, key: str) -> None:
         with self._lock:
@@ -76,6 +78,7 @@ class FailureLock:
             self._locked_until.clear()
 
 
-# 登录：同一 IP 每分钟 10 次；同一账号连续失败 5 次锁定 15 分钟（PRD 7.5）。
+# 登录：同一 IP 每分钟 10 次；同一账号连续失败 5 次锁定 15 分钟。注册：同一 IP 每小时 5 次（PRD 7.5）。
 login_ip_limiter = SlidingWindowLimiter(limit=10, window_seconds=60)
 login_failure_lock = FailureLock(max_failures=5, lock_seconds=15 * 60)
+register_ip_limiter = SlidingWindowLimiter(limit=5, window_seconds=3600)

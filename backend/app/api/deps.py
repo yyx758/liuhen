@@ -1,6 +1,6 @@
 """路由共用的依赖：数据库会话与当前用户。
 
-依赖链：current_session_user（有效会话）→ current_user（且不处于强制改密）→ current_user_id。
+依赖链：current_session_user（有效会话）→ current_user（且不处于强制改密）→ current_user_id / require_admin。
 FastAPI 在同一请求内只执行一次 get_db，三者拿到的是同一个数据库 Session。
 """
 
@@ -33,8 +33,23 @@ def current_user(user: SessionUser) -> CurrentUser:
     return user
 
 
-def current_user_id(user: Annotated[CurrentUser, Depends(current_user)]) -> int:
+# 个人设置等需要完整用户信息（如当前会话 ID）的接口使用。
+ActiveUser = Annotated[CurrentUser, Depends(current_user)]
+
+
+def current_user_id(user: ActiveUser) -> int:
     return user.id
+
+
+def require_admin(user: ActiveUser) -> CurrentUser:
+    # 角色每次请求都从数据库重新读取（resolve_session），撤销管理员后立即生效。
+    if user.role != "admin":
+        raise HTTPException(403, "需要管理员权限")
+    return user
+
+
+# /admin/* 路由只依赖这个类型。
+AdminUser = Annotated[CurrentUser, Depends(require_admin)]
 
 
 # 业务路由只依赖这个类型；user_id 只能从这里来，不接受请求参数里的 user_id。
