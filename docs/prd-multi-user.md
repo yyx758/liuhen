@@ -504,7 +504,7 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 | P2 数据隔离（已完成） | 业务表加 `user_id`、排他约束按用户、服务/仓储/工具全链路传 `user_id`、`request_id` 等归属校验；此阶段请求固定归属开发用户 `dev`（`api/deps.py`，标 `TEMP`） | 13.1 全部通过（`test_user_isolation.py`）；跨用户测评场景与真实模型测评回归后置（D19） |
 | P3 认证会话（已完成） | 密码哈希、`user_sessions`、`/auth/login\|logout\|me\|password`、`CurrentUserId` 改为从会话解析、Origin 校验、限流、CLI；前端登录页接入、改密页（因 CLI 的重置密码在本阶段可用，从 P4 提前）、路由守卫、`localStorage` 隔离 | 13.2 中登录/会话部分通过（`test_auth.py`）；P2 的 `TEMP` 注入已删除 |
 | P4 注册审核与账号管理（已完成） | 注册、状态机、`/admin/*`、`account_events`、个人设置（邮箱、在线设备、登录记录）；`users` 增加 `reviewed_at`、`reviewed_by`；前端注册页、个人设置页、管理后台；Caddy 转发 `/admin/*` | 13.2 全部通过（`test_accounts.py`）；管理后台的对话用量列与 `PATCH /admin/users/{id}`（调整上限）随 P5 实现 |
-| P5 用量与上线 | 每日对话上限与管理员用量统计、Caddy 改造、`verify_site.py` 更新、存量数据迁移演练、文档更新（`CLAUDE.md`、各 README） | 13.3、13.5 通过；在线上库的副本上完整演练 12.2 |
+| P5 用量与上线（已完成，线上演练待作者执行） | 每日对话上限与管理员用量统计、Caddy 改造、`verify_site.py` 更新、存量数据迁移演练、文档更新（`CLAUDE.md`、各 README） | 13.3（`test_usage.py`）、13.5 通过；12.2 已在本地模拟旧库上演练（备份 → 重建 → 迁移 → 创建管理员；`0003` 拒绝在有数据的库上执行），线上库副本的演练需在服务器上执行。补充：删除会话的轮次记入 `deleted_chat_requests.turn_created_at`，防止删会话绕过上限 |
 
 ## 15. 讨论记录
 

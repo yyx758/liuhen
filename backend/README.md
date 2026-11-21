@@ -32,6 +32,7 @@
 - 注册（`POST /auth/register`，同一 IP 每小时 5 次）后账号为 `pending`，管理员通过后才能登录。管理员接口在 `/admin/*`（依赖 `AdminUser`，普通用户 403）：账号列表、审核通过/拒绝、停用/启用（停用立即吊销会话）、重置密码、删除待审核或已拒绝账号、查看账号事件。管理员不能停用或重置自己；停用时同时锁住操作者，保证始终有一个正常的管理员。
 - 个人设置：`PATCH /auth/me` 修改邮箱（需当前密码）、`/auth/sessions` 在线设备与下线、`GET /auth/events` 最近 30 天的登录与密码事件。除 `GET /auth/me`、`POST /auth/password` 外，这些接口在强制改密期间同样返回 403。
 - 账号事件 `account_events` 只追加，与账号变更同一事务提交：注册、审核、停用/启用、删除、改密/重置、改邮箱、角色变更、登录成功/失败/锁定、下线设备。账号不存在的登录失败不入表；`target_user_id`、`actor_user_id` 不加外键，账号删除后记录仍保留，命令行操作的 `actor_user_id` 为空。
+- 每日对话上限：普通用户每个 UTC+08:00 自然日最多新建 `daily_chat_limit` 轮对话（为空时取 `default_daily_chat_limit` / `LIUHEN_DEFAULT_DAILY_CHAT_LIMIT`，默认 50），超出时 `POST /chat` 返回 429；管理员不受限制但照常计数。检查在 `acquire_turn` 新建轮次的同一事务里进行，先锁用户行，并发请求不能突破上限；同一 `request_id` 重试不计数。删除会话时被删轮次的创建时间保留在 `deleted_chat_requests.turn_created_at`，用量统计两处相加，删除会话不能重置用量。`/auth/me` 返回 `chat_usage`；管理员列表与详情返回今日、近 7 天用量，`PATCH /admin/users/{id}` 调整单个用户的上限（`null` 恢复默认）。
 - 账号管理命令行：
 
   ```powershell

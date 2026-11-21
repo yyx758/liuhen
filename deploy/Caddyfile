@@ -1,16 +1,13 @@
 liuhen.yyyyx.top {
     encode zstd gzip
 
-    @private path /app /app/* /auth /auth/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/* /admin /admin/*
-    basic_auth @private {
-        {$LIUHEN_AUTH_USER} {$LIUHEN_AUTH_HASH}
-    }
-
     header {
         X-Content-Type-Options nosniff
         Referrer-Policy same-origin
     }
 
+    # 访问控制由应用自己的账号登录负责（D7）；Caddy 只做 HTTPS 和转发。
+    # reverse_proxy 默认带上 X-Forwarded-For，API 据此按真实 IP 限流。
     @api path /auth /auth/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/* /admin /admin/*
     handle @api {
         reverse_proxy api:8000

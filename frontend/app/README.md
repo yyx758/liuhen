@@ -18,7 +18,7 @@ npm ci
 npm run dev
 ```
 
-访问 `http://127.0.0.1:5173/`。开发服务固定监听 IPv4 地址 `127.0.0.1` 和端口 `5173`；修改 Vite 配置后需停止旧进程并重新运行 `npm run dev`。Vite 在开发环境将 `/tasks`、`/chat`、`/actions`、`/audit` 代理到 `http://127.0.0.1:8000`。部署时可设置 `VITE_API_BASE_URL` 指向同源反向代理或允许跨域的 API 地址。
+访问 `http://127.0.0.1:5173/`。开发服务固定监听 IPv4 地址 `127.0.0.1` 和端口 `5173`；修改 Vite 配置后需停止旧进程并重新运行 `npm run dev`。Vite 在开发环境将 `/auth`、`/admin`、`/tasks`、`/chat`、`/actions`、`/audit` 代理到 `http://127.0.0.1:8000`。部署时可设置 `VITE_API_BASE_URL` 指向同源反向代理或允许跨域的 API 地址。
 
 在 Windows 上重新执行 `npm ci` 前，先停止正在运行的本项目前端开发服务器；Vite 加载的原生模块可能使依赖清理遇到 `EPERM`。日常启动无需重复执行 `npm ci`。
 

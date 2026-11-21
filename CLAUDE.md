@@ -8,14 +8,14 @@
 
 - 优先级：可靠性、可解释性、操作留痕、可验证性，而不是堆功能。
 - 当前已实现：任务管理、AI 对话与提案确认、操作留痕、Vue 3 前端（对话、待办、日历、留痕页）、后端测试与 Agent 测评。
-- 多用户改造按 `docs/prd-multi-user.md` 分阶段进行。已完成：业务数据按 `user_id` 隔离；账号密码登录（Argon2id 哈希、服务端会话 + HttpOnly Cookie、强制改密、Origin 校验、登录限流）；注册与管理员审核、账号停用/启用/删除、管理后台（`/admin/*`，依赖 `AdminUser`）、个人设置（邮箱、在线设备、登录记录）、只追加的账号事件 `account_events`；账号管理命令行 `python -m backend.app.cli`。尚未实现：每日对话上限与用量统计（P5）。
+- 多用户改造按 `docs/prd-multi-user.md` 分阶段进行。已完成：业务数据按 `user_id` 隔离；账号密码登录（Argon2id 哈希、服务端会话 + HttpOnly Cookie、强制改密、Origin 校验、登录限流）；注册与管理员审核、账号停用/启用/删除、管理后台（`/admin/*`，依赖 `AdminUser`）、个人设置（邮箱、在线设备、登录记录）、只追加的账号事件 `account_events`；每日对话上限（按 UTC+08:00 自然日统计 `chat_turns` 与 `deleted_chat_requests`，管理员不限量）与管理员用量统计；账号管理命令行 `python -m backend.app.cli`。
 - 尚未实现（不要因路线图提前实现）：提醒主动推送、文档管理后端与 Agent 工具、偏好管理、SSE 流式接口、会话列表/历史的 HTTP 接口。前端资料库只是原型示例。
 
 ## 技术栈与结构
 
 - 后端：Python 3.11+、FastAPI、Pydantic、SQLAlchemy、PostgreSQL；`.env` 由 `python-dotenv` 读取，模型请求走 HTTP。
 - 前端：Vue 3、TypeScript、Vite、Vue Router；共享状态用 `src/state.ts` 的响应式对象（未引入 Pinia）；视觉以 `frontend/reference/index.html` 原型为准。
-- 部署：Docker Compose + Caddy（HTTPS、Basic Auth 保护 `/app/` 和 API），FastAPI 与 PostgreSQL 只在内部网络开放。
+- 部署：Docker Compose + Caddy（HTTPS 与 API 转发；访问控制由应用账号登录负责，不再用 Basic Auth），FastAPI 与 PostgreSQL 只在内部网络开放。
 
 | 路径 | 内容 |
 | --- | --- |
@@ -84,7 +84,7 @@ docker compose -f deploy/compose.yaml logs --tail=100
 python3 deploy/verify_site.py
 ```
 
-`.env` 需填写 `base_url`（完整聊天接口地址）、`api_key`、`model`、`database_url`（`postgresql+psycopg://...`，密码需 URL 编码）；可选 `judge_base_url`、`judge_api_key`、`judge_model`；本地用 http 访问前端时设 `cookie_secure=false`，`allowed_origins` 默认是本地 Vite 地址。缺数据库配置时服务拒绝启动。表结构由 Alembic 迁移维护（`backend/migrations/`），数据库版本不是最新时服务拒绝启动；修改 ORM 模型必须同时新增迁移脚本，`test_migrations.py` 会比对迁移结果与模型（`EXCLUDE` 约束只按名字核对）。
+`.env` 需填写 `base_url`（完整聊天接口地址）、`api_key`、`model`、`database_url`（`postgresql+psycopg://...`，密码需 URL 编码）；可选 `judge_base_url`、`judge_api_key`、`judge_model`；本地用 http 访问前端时设 `cookie_secure=false`，`allowed_origins` 默认是本地 Vite 地址，`default_daily_chat_limit` 默认 50。缺数据库配置时服务拒绝启动。表结构由 Alembic 迁移维护（`backend/migrations/`），数据库版本不是最新时服务拒绝启动；修改 ORM 模型必须同时新增迁移脚本，`test_migrations.py` 会比对迁移结果与模型（`EXCLUDE` 约束只按名字核对）。
 
 ## 核心业务规则（改代码前需理解）
 
