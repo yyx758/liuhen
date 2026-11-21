@@ -21,10 +21,6 @@ export function displayDate(value: string | null) {
   const date = new Date(`${local.date}T12:00:00`)
   return `${date.getMonth() + 1}月${date.getDate()}日 · 周${'日一二三四五六'[date.getDay()]} ${local.time}`
 }
-export function inputDateTime(value: string | null) {
-  const local = localParts(value)
-  return local ? `${local.date}T${local.time}` : ''
-}
 export function toApiDateTime(value: string) { return value ? `${value}:00+08:00` : null }
 export function sortTasks(tasks: Task[]) {
   return [...tasks].sort((a, b) => (a.start_at || a.due_at || '').localeCompare(b.start_at || b.due_at || ''))

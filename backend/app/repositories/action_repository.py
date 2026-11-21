@@ -105,23 +105,21 @@ def transition_status(
     return result.rowcount == 1
 
 
-def expire_pending(session: Session, now: int, task_id: int | None = None) -> int:
+def expire_pending(session: Session, now: int, task_id: int) -> int:
     stmt = update(PendingActionORM).where(
+        PendingActionORM.task_id == task_id,
         PendingActionORM.status == "pending",
         PendingActionORM.expires_at <= now,
     ).values(status="expired")
-    if task_id is not None:
-        stmt = stmt.where(PendingActionORM.task_id == task_id)
     return session.execute(stmt.execution_options(synchronize_session=False)).rowcount
 
 
-def list_due_pending(session: Session, now: int, task_id: int | None = None) -> list[PendingActionORM]:
+def list_due_pending(session: Session, now: int, task_id: int) -> list[PendingActionORM]:
     stmt = select(PendingActionORM).where(
+        PendingActionORM.task_id == task_id,
         PendingActionORM.status == "pending",
         PendingActionORM.expires_at <= now,
     ).order_by(PendingActionORM.id)
-    if task_id is not None:
-        stmt = stmt.where(PendingActionORM.task_id == task_id)
     return list(session.scalars(stmt).all())
 
 

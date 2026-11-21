@@ -27,7 +27,6 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self.session_patch.stop()
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     async def run_with_tool_call(self, title: str, final_reply: str) -> tuple[str, list[dict]]:

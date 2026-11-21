@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
+import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { api } from './api'
 import { displayDate, taskDate, taskTime } from './format'
 import { refresh, runAction, state } from './state'
@@ -17,8 +17,11 @@ const detail = computed(() => state.tasks.find(task => task.id === state.detailT
 const detailIsAi = computed(() => Boolean(detail.value?.created_by_agent))
 const icpRecord = import.meta.env.VITE_ICP_RECORD?.trim() || '赣ICP备2026013160号-1'
 const policeRecord = import.meta.env.VITE_POLICE_RECORD?.trim()
+const route = useRoute()
+const isLoginPage = computed(() => route.path === '/login')
 
-onMounted(() => { void refresh(); clock = setInterval(() => { state.clockNow = Date.now() }, 1000) })
+watch(isLoginPage, loginPage => { if (!loginPage) void refresh() }, { immediate: true })
+onMounted(() => { clock = setInterval(() => { state.clockNow = Date.now() }, 1000) })
 onUnmounted(() => { if (clock) clearInterval(clock) })
 function closeNotice() { state.error = ''; state.toast = '' }
 function fullDate(value: string) {
@@ -36,7 +39,7 @@ async function deleteTask(id: number, version: number) {
 </script>
 
 <template>
-  <div class="shell site-shell">
+  <div v-if="!isLoginPage" class="shell site-shell">
     <header class="topbar">
       <RouterLink to="/" class="brand" aria-label="小记首页"><span class="brand-mark"><Icon name="spark" :size="13" /></span>小记<span class="brand-period">.</span></RouterLink>
       <nav class="nav" aria-label="主导航">
@@ -54,8 +57,9 @@ async function deleteTask(id: number, version: number) {
       </div>
     </footer>
   </div>
-  <TaskDialog />
-  <div v-if="detail" class="drawer-overlay" @click.self="state.detailTaskId = null">
+  <RouterView v-else />
+  <TaskDialog v-if="!isLoginPage" />
+  <div v-if="!isLoginPage && detail" class="drawer-overlay" @click.self="state.detailTaskId = null">
     <section class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
       <div class="drawer-head"><span class="tiny">待办详情 / 其他</span><button class="close-btn" type="button" aria-label="关闭" @click="state.detailTaskId = null"><Icon name="x" :size="20" /></button></div>
       <span class="tag" :class="detail.status === 'done' ? 'green' : detail.priority === 'high' ? 'red' : 'blue'">{{ detail.status === 'done' ? '已完成' : detail.priority === 'high' ? '高优先级' : '进行中' }}</span><span v-if="detailIsAi" class="tag ai" style="margin-left:7px">AI 安排</span>
@@ -68,5 +72,5 @@ async function deleteTask(id: number, version: number) {
       <div class="detail-section"><h3 class="subheading">关于这条待办</h3><div class="meta-line">分类 · 其他</div><div class="meta-line">优先级 · {{ detail.priority === 'high' ? '高' : detail.priority === 'medium' ? '中' : '低' }}</div><div class="meta-line">创建方式 · {{ detailIsAi ? '小记建议' : '手动添加' }}</div><div v-if="detail.due_at" class="meta-line">截止时间 · {{ displayDate(detail.due_at) }}</div></div>
     </section>
   </div>
-  <div v-if="state.toast" class="toast" role="status"><span>{{ state.toast }}</span><button type="button" aria-label="关闭" @click="state.toast = ''">×</button></div>
+  <div v-if="!isLoginPage && state.toast" class="toast" role="status"><span>{{ state.toast }}</span><button type="button" aria-label="关闭" @click="state.toast = ''">×</button></div>
 </template>

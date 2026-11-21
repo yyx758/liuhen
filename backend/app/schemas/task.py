@@ -60,13 +60,19 @@ class TaskRead(BaseModel):
     id:int
     title: str = Field(min_length=1, max_length=100)
     priority: Literal["low", "medium", "high"] = "medium"
-    # 兼容升级前尚未排期的任务和旧操作提案快照
+    # 开始时间和截止时间至少有一个；结束时间和时长只在已排期时存在
     start_at: datetime | None = None
     end_at: datetime | None = None
     duration_minutes: int | None = None
     due_at: datetime | None = None
     status:Literal["todo","done"] = "todo"
     version: int = 1
+
+    @model_validator(mode="after")
+    def require_time(self):
+        if self.start_at is None and self.due_at is None:
+            raise ValueError("开始时间和截止时间至少有一个")
+        return self
 
 
 class TaskListItem(TaskRead):

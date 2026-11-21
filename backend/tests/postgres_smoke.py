@@ -9,43 +9,25 @@ from threading import Barrier
 from unittest.mock import patch
 from uuid import uuid4
 
-import psycopg
-from psycopg import sql
 from fastapi import HTTPException
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.engine import make_url
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.db.session import get_db
-from backend.app.db.session import DATABASE_URL
 from backend.app.api import tasks as tasks_api
-from backend.app.models import action, conversation, operation_event, request, task  # noqa: F401
 from backend.app.models.action import PendingActionORM
+from backend.app.models.conversation import ConversationORM
 from backend.app.models.task import TaskORM
 from backend.app.repositories import task_repository
 from backend.app.schemas.task import TaskCreate, TaskUpdate
-from backend.app.services import action_service, chat_turn_service, conversation_service, task_service
+from backend.app.services import action_service, chat_turn_service, task_service
 
 
 def run() -> None:
-    url = make_url(DATABASE_URL)
-    if url.get_backend_name() != "postgresql":
-        raise RuntimeError(".env 的 database_url 必须指向 PostgreSQL")
-
-    test_name = f"liuhen_test_{uuid4().hex[:12]}"
-    admin = psycopg.connect(
-        host=url.host, port=url.port, user=url.username,
-        password=url.password, dbname="postgres", autocommit=True,
-    )
-    engine = None
-    try:
-        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(test_name)))
-        engine = create_engine(url.set(database=test_name))
-        Base.metadata.create_all(engine)
-
+    with isolated_engine() as engine:
         request_id = str(uuid4())
         data = TaskCreate(
             title="PostgreSQL 测试任务",
@@ -178,8 +160,11 @@ def run() -> None:
         assert proposal_ids[0] != proposal_ids[1]
 
         factory = sessionmaker(bind=engine)
-        with factory() as session:
-            conversation_id = conversation_service.create_conversation(session)
+        conversation_id = str(uuid4())
+        with factory() as session, session.begin():
+            session.add(ConversationORM(
+                id=conversation_id, created_at=0, updated_at=0, message_count=0,
+            ))
         turn_barrier = Barrier(2)
 
         def concurrent_turn(_: int) -> int:
@@ -222,12 +207,5 @@ def run() -> None:
             )))
             assert sorted(statuses) == ["pending", "replaced"], statuses
         print("PostgreSQL smoke test passed: HTTP, read/write, idempotency, time, proposal, concurrent create/confirm/propose/chat")
-    finally:
-        if engine is not None:
-            engine.dispose()
-        admin.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(test_name)))
-        admin.close()
-
-
 if __name__ == "__main__":
     run()

@@ -98,3 +98,36 @@
 .site-shell{min-height:100vh;display:flex;flex-direction:column}
 .site-shell>.page{flex:1}
 .site-shell>.site-footer{margin-top:auto}
+
+/* Login page follows the supplied open, left-aligned visual reference. */
+.login-page{min-height:100vh;background:var(--bg)}
+.login-shell{max-width:1413px;min-height:100vh;margin:0 auto;padding:0 59px 72px}
+.login-header{height:87px;border-bottom:1px solid #c8d1e2;display:flex;align-items:center;justify-content:space-between;gap:24px}
+.login-brand{font-size:30px;line-height:1;font-weight:800;letter-spacing:-1.5px;color:#07142d}
+.login-register{font-size:18px;color:#63708c;white-space:nowrap}
+.login-register button{border:0;background:none;padding:0;color:#07142d;font-weight:700;text-decoration:underline;text-decoration-color:transparent;text-underline-offset:4px}
+.login-register button:hover{text-decoration-color:currentColor}
+.login-content{max-width:580px;padding-top:105px}
+.login-content h1{font-size:clamp(58px,6.6vw,92px);line-height:1.14;letter-spacing:-.06em;margin:0;font-weight:800;color:#14213d}
+.login-intro{font-size:23px;line-height:1.5;margin:21px 0 59px;color:#14213d}
+.login-form{display:flex;flex-direction:column}
+.login-form>label{font-size:18px;color:#61708e;margin-bottom:10px}
+.login-form>input,.login-password-row{width:100%;height:54px;border:0;border-bottom:2px solid #14213d;border-radius:0;background:transparent;color:#14213d}
+.login-form>input{padding:0 0 9px;font-size:23px;outline:none}
+.login-form>input::placeholder,.login-password-row input::placeholder{color:#697995;opacity:1}
+.login-form>input:focus,.login-password-row:focus-within{border-color:var(--blue)}
+.login-form>label[for="login-password"]{margin-top:32px}
+.login-password-row{display:flex;align-items:center;gap:12px}
+.login-password-row input{flex:1;min-width:0;height:100%;border:0;background:transparent;padding:0 0 9px;outline:none;font-size:23px;color:#14213d}
+.login-password-row button{border:0;background:transparent;color:#14213d;text-decoration:underline;font-size:18px;padding:8px 0 12px}
+.login-options{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:37px 0 29px;font-size:18px}
+.login-remember{display:flex;align-items:center;gap:17px;white-space:nowrap}
+.login-remember input{width:24px;height:24px;margin:0;accent-color:var(--blue)}
+.login-options>button{border:0;background:none;color:#14213d;text-decoration:underline;padding:4px 0;white-space:nowrap}
+.login-submit{width:100%;height:65px;border:0;border-radius:5px;background:#304de1;color:white;font-size:21px;font-weight:600;transition:background .18s ease}
+.login-submit:hover{background:#213cc9}
+.login-notice{margin:18px 0 0;padding:11px 14px;border:1px solid #cbd5ed;background:#f8faff;border-radius:5px;color:#3e4e75;font-size:14px;line-height:1.5}
+.login-footnote{margin:40px 0 0;color:#62728e;font-size:18px;line-height:1.6}
+.login-footnote span{background:#ffe066;color:#14213d;border-radius:3px;padding:1px 7px;margin-right:5px}
+@media(max-width:760px){.login-shell{padding:0 24px 48px}.login-header{height:72px}.login-brand{font-size:25px}.login-register{font-size:14px}.login-content{padding-top:74px}.login-content h1{font-size:clamp(52px,11vw,72px)}.login-intro{font-size:18px;margin:17px 0 45px}.login-form>label{font-size:15px}.login-form>input,.login-password-row input{font-size:19px}.login-options{font-size:14px;margin:31px 0 25px}.login-remember{gap:8px}.login-remember input{width:20px;height:20px}.login-submit{height:58px;font-size:18px}.login-footnote{font-size:14px;margin-top:33px}}
+@media(max-width:390px){.login-options{align-items:flex-start}.login-remember{white-space:normal}}

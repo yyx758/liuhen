@@ -21,6 +21,13 @@ from backend.app.schemas.task import TaskCreate
 from backend.app.services import chat_service, chat_turn_service, conversation_service, task_service
 
 
+def add_conversation(session_factory) -> str:
+    conversation_id = str(uuid4())
+    with session_factory() as session, session.begin():
+        session.add(ConversationORM(id=conversation_id, created_at=0, updated_at=0, message_count=0))
+    return conversation_id
+
+
 class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
@@ -28,7 +35,6 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def test_direct_create_request_is_idempotent(self) -> None:
@@ -68,21 +74,17 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(session.scalars(select(TaskORM)).all()), 1)
 
     def test_same_conversation_is_claimed_before_model_call(self) -> None:
-        with Session(self.engine) as session:
-            conversation_id = conversation_service.create_conversation(session)
         first = chat_turn_service.acquire_turn(
-            str(uuid4()), "第一轮", conversation_id, self.session_factory
+            str(uuid4()), "第一轮", None, self.session_factory
         )
         with self.assertRaises(HTTPException) as raised:
             chat_turn_service.acquire_turn(
-                str(uuid4()), "第二轮", conversation_id, self.session_factory
+                str(uuid4()), "第二轮", first.conversation_id, self.session_factory
             )
         self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(first.conversation_id, conversation_id)
 
     def test_concurrent_claim_has_one_winner(self) -> None:
-        with Session(self.engine) as session:
-            conversation_id = conversation_service.create_conversation(session)
+        conversation_id = add_conversation(self.session_factory)
         barrier = Barrier(2)
 
         def claim() -> str:

@@ -1,7 +1,7 @@
 """The agreed Agent scenarios and their isolated setup steps."""
 
 import asyncio
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -122,7 +122,6 @@ class ScenarioContext:
         turn = {
             "user_input": user_text,
             "request_id": request_id,
-            "started_at_real": datetime.now(timezone.utc).isoformat(),
         }
         self.turns.append(turn)
         try:
@@ -135,8 +134,6 @@ class ScenarioContext:
         except Exception as exc:
             turn["error"] = f"{type(exc).__name__}: {exc}"
             raise
-        finally:
-            turn["completed_at_real"] = datetime.now(timezone.utc).isoformat()
         self.conversation_id = conversation_id
         turn["conversation_id"] = conversation_id
         turn["reply"] = reply

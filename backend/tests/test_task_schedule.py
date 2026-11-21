@@ -21,7 +21,6 @@ class TaskScheduleTests(unittest.TestCase):
         self.registry = ToolRegistry()
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def create(self, title: str, start_at: str, duration_minutes: int) -> dict:
@@ -99,14 +98,7 @@ class TaskScheduleTests(unittest.TestCase):
         self.assertEqual(task["end_at"], "2026-11-18T15:00:00+08:00")
         self.assertEqual(task["due_at"], "2026-11-17T12:00:00+08:00")
 
-    def test_done_and_legacy_unscheduled_tasks_do_not_block(self) -> None:
-        with Session(self.engine) as session, session.begin():
-            session.add(TaskORM(title="旧任务", priority="medium", status="todo", version=1))
-        with Session(self.engine) as session:
-            legacy = list_tasks(session)[0]
-            self.assertIsNone(legacy.start_at)
-            self.assertIsNone(legacy.duration_minutes)
-
+    def test_done_tasks_do_not_block(self) -> None:
         first = self.create("已完成", "2026-11-18T14:00:00+08:00", 60)
         with Session(self.engine) as session, session.begin():
             session.get(TaskORM, first["id"]).status = "done"
@@ -145,12 +137,9 @@ class TaskScheduleTests(unittest.TestCase):
                         self.assertEqual(exc.status_code, 409)
                         return "conflict"
 
-            try:
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    outcomes = list(pool.map(create_once, ["A", "B"]))
-                self.assertCountEqual(outcomes, ["created", "conflict"])
-            finally:
-                engine.dispose()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = list(pool.map(create_once, ["A", "B"]))
+            self.assertCountEqual(outcomes, ["created", "conflict"])
 
 if __name__ == "__main__":
     unittest.main()

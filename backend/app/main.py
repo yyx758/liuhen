@@ -18,6 +18,7 @@ from backend.app.models.action import PendingActionORM
 from backend.app.models.conversation import ConversationORM, ConversationMessageORM
 from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM, TaskCreateRequestORM
 from backend.app.models.operation_event import OperationEventORM
+from backend.app.models.user import UserORM
 
 
 logger = logging.getLogger(__name__)

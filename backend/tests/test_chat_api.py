@@ -28,7 +28,6 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     async def test_injected_clock_and_session_factory_cover_full_turn(self) -> None:

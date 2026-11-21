@@ -21,6 +21,8 @@
 
 后端使用 Python、FastAPI、Pydantic、SQLAlchemy 和 PostgreSQL。模型请求通过 HTTP 发送，`.env` 使用 `python-dotenv` 读取。
 
+账号准备：`users` ORM 表包含唯一用户名、可选唯一邮箱、密码哈希、启用状态和创建／更新时间。连接 PostgreSQL 启动 API 时会自动创建缺失的表；当前不提供注册、密码校验或会话接口，也不将任务等现有记录关联到用户。后续实现登录时只保存密码哈希，不存明文密码；身份与数据归属校验需同时接入。
+
 ```text
 客户端 ── /chat ── chat_service ── agent_runner ── 模型接口
                               │              └─ ToolRegistry

@@ -23,7 +23,6 @@ class ActionLifecycleTests(unittest.TestCase):
         self.engine = self.database.__enter__()
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def create_task(self):
@@ -117,10 +116,12 @@ class ActionLifecycleTests(unittest.TestCase):
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, unattended.id).expires_at = 0
         with Session(self.engine) as session:
-            self.assertEqual(action_service.expire_due_actions(session), 1)
-        self.assertEqual(self.status(unattended.id), "expired")
+            self.assertEqual(action_service.purge_expired_actions(session), 2)
         with Session(self.engine) as session:
-            self.assertEqual(action_service.expire_due_actions(session), 0)
+            self.assertIsNone(session.get(PendingActionORM, unattended.id))
+            self.assertIsNone(session.get(PendingActionORM, expired.id))
+        with Session(self.engine) as session:
+            self.assertEqual(action_service.purge_expired_actions(session), 0)
 
     def test_stale_version_marks_conflict_and_allows_new_proposal(self) -> None:
         task = self.create_task()

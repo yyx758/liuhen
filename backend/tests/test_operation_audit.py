@@ -26,7 +26,6 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def create(self, title="原任务", start="2030-01-02T14:00:00+08:00", request_id=None):
@@ -125,8 +124,11 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, expired.id).expires_at = 0
         with Session(self.engine) as session:
-            action_service.expire_due_actions(session)
-        self.assertEqual(self.events(expired.id)[-1].event_type, "proposal_expired")
+            action_service.purge_expired_actions(session)
+        self.assertEqual(
+            [row.event_type for row in self.events(expired.id)][-2:],
+            ["proposal_expired", "proposal_deleted"],
+        )
 
         with Session(self.engine) as session:
             conflict = action_service.propose_update(
@@ -242,8 +244,8 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         active = self.propose_update(third.id, "仍有效")
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, marked_expired.id).expires_at = 0
-        with Session(self.engine) as session:
-            self.assertEqual(action_service.expire_due_actions(session), 1)
+        with Session(self.engine) as session, self.assertRaises(HTTPException):
+            action_service.confirm_action(session, marked_expired.id)
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, pending_expired.id).expires_at = 0
         with Session(self.engine) as session:

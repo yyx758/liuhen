@@ -18,7 +18,6 @@ class FrontendAuditQueryTests(unittest.TestCase):
         self.engine = self.database.__enter__()
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def test_cursor_summary_and_task_origin(self) -> None:

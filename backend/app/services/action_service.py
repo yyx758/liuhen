@@ -114,8 +114,7 @@ def build_updated_snapshot(before: TaskRead, data: TaskUpdate) -> TaskRead:
         )
 
     if (
-        (before.start_at is not None or before.due_at is not None)
-        and changes.get("start_at", before.start_at) is None
+        changes.get("start_at", before.start_at) is None
         and changes.get("due_at", before.due_at) is None
     ):
         raise HTTPException(422, "开始时间和截止时间至少保留一个")
@@ -162,9 +161,7 @@ def find_schedule_conflict(
     )
 
 
-def expire_pending_with_audit(
-    session: Session, now: int, task_id: int | None = None
-) -> int:
+def expire_pending_with_audit(session: Session, now: int, task_id: int) -> int:
     due = action_repository.list_due_pending(session, now, task_id)
     if not due:
         return 0
@@ -293,12 +290,6 @@ def propose_delete(
         result = save_proposal(session, action, now)
 
     return result
-
-
-def expire_due_actions(session: Session) -> int:
-    """Mark unattended proposals expired; retain their snapshots as history."""
-    with session.begin():
-        return expire_pending_with_audit(session, now_timestamp())
 
 
 def purge_expired_actions(session: Session) -> int:

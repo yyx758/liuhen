@@ -12,7 +12,7 @@ from backend.app.config.clock import fixed_now, now_utc
 from backend.app.config.settings import USER_TIMEZONE
 from backend.app.db.isolated import isolated_engine
 from backend.app.evals.scenarios import ScenarioContext
-from backend.app.evals.run import run_case_01
+from backend.app.evals.run import run_case
 from backend.app.schemas.task import TaskUpdate
 from backend.app.services import action_service, chat_service
 
@@ -21,47 +21,44 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_evaluation_clock_covers_proposals_and_action_api(self) -> None:
         frozen = datetime(2030, 1, 1, 10, tzinfo=USER_TIMEZONE)
         with isolated_engine() as engine:
-            try:
-                factory = sessionmaker(bind=engine)
-                context = ScenarioContext(factory, frozen)
-                task_id = context.add_task("项目报告", start_at=context.local_time(1, 9))
+            factory = sessionmaker(bind=engine)
+            context = ScenarioContext(factory, frozen)
+            task_id = context.add_task("项目报告", start_at=context.local_time(1, 9))
 
-                async def fake_send_message(*args, **kwargs):
-                    self.assertEqual(now_utc(), frozen.astimezone(timezone.utc))
-                    return "conversation", "已收到"
+            async def fake_send_message(*args, **kwargs):
+                self.assertEqual(now_utc(), frozen.astimezone(timezone.utc))
+                return "conversation", "已收到"
 
-                with patch.object(chat_service, "send_message", side_effect=fake_send_message):
-                    await context.say("测试消息")
-                self.assertIn("completed_at_real", context.turns[0])
+            with patch.object(chat_service, "send_message", side_effect=fake_send_message):
+                await context.say("测试消息")
+            self.assertEqual(context.turns[0]["reply"], "已收到")
 
-                def propose(title: str):
-                    with factory() as session:
-                        return action_service.propose_update(
-                            session, task_id, TaskUpdate(title=title),
-                        )
+            def propose(title: str):
+                with factory() as session:
+                    return action_service.propose_update(
+                        session, task_id, TaskUpdate(title=title),
+                    )
 
-                with fixed_now(frozen):
-                    expired = await asyncio.to_thread(propose, "过期修改")
-                self.assertEqual(expired.created_at, frozen.astimezone(timezone.utc))
-                self.assertEqual(
-                    expired.expires_at,
-                    frozen.astimezone(timezone.utc) + timedelta(minutes=10),
-                )
+            with fixed_now(frozen):
+                expired = await asyncio.to_thread(propose, "过期修改")
+            self.assertEqual(expired.created_at, frozen.astimezone(timezone.utc))
+            self.assertEqual(
+                expired.expires_at,
+                frozen.astimezone(timezone.utc) + timedelta(minutes=10),
+            )
 
-                context.evaluation_now = frozen + timedelta(minutes=11)
-                rejected = await context.invoke_action("confirm", expired.id)
-                self.assertEqual(rejected["status_code"], 409)
-                self.assertIn("过期", rejected["detail"])
+            context.evaluation_now = frozen + timedelta(minutes=11)
+            rejected = await context.invoke_action("confirm", expired.id)
+            self.assertEqual(rejected["status_code"], 409)
+            self.assertIn("过期", rejected["detail"])
 
-                with fixed_now(frozen):
-                    pending = await asyncio.to_thread(propose, "确认修改")
-                context.evaluation_now = frozen + timedelta(minutes=5)
-                confirmed = await context.invoke_action("confirm", pending.id)
-                self.assertEqual(confirmed["status_code"], 200)
-                self.assertEqual(confirmed["result"]["status"], "executed")
-                self.assertNotEqual(now_utc().year, 2030)
-            finally:
-                engine.dispose()
+            with fixed_now(frozen):
+                pending = await asyncio.to_thread(propose, "确认修改")
+            context.evaluation_now = frozen + timedelta(minutes=5)
+            confirmed = await context.invoke_action("confirm", pending.id)
+            self.assertEqual(confirmed["status_code"], 200)
+            self.assertEqual(confirmed["result"]["status"], "executed")
+            self.assertNotEqual(now_utc().year, 2030)
 
     async def test_first_case_collects_isolated_business_evidence(self) -> None:
         call = {
@@ -91,7 +88,7 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm),
             patch.object(chat_service, "SessionLocal", side_effect=AssertionError("访问了开发数据库")),
         ):
-            result = await run_case_01(datetime(2030, 1, 1, 12, tzinfo=USER_TIMEZONE))
+            result = await run_case("01", datetime(2030, 1, 1, 12, tzinfo=USER_TIMEZONE))
 
         self.assertEqual(result["case_id"], "01")
         self.assertEqual(result["chat_turn_status"], "completed")

@@ -5,16 +5,17 @@ import CalendarPage from './views/CalendarPage.vue'
 import TasksPage from './views/TasksPage.vue'
 import LibraryPage from './views/LibraryPage.vue'
 import AuditPage from './views/AuditPage.vue'
+import LoginPage from './views/LoginPage.vue'
 
 export const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
+    { path: '/login', component: LoginPage },
     { path: '/', component: HomePage },
     { path: '/chat', component: ChatPage },
     { path: '/calendar', component: CalendarPage },
     { path: '/tasks', component: TasksPage },
     { path: '/library', component: LibraryPage },
-    { path: '/review', redirect: '/history?filter=pending' },
     { path: '/history', component: AuditPage },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

@@ -10,6 +10,13 @@ from backend.app.models.conversation import ConversationORM
 from backend.app.services import chat_turn_service, conversation_service
 
 
+def add_conversation(session_factory) -> str:
+    conversation_id = str(uuid4())
+    with session_factory() as session, session.begin():
+        session.add(ConversationORM(id=conversation_id, created_at=0, updated_at=0, message_count=0))
+    return conversation_id
+
+
 class ConversationStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
@@ -17,12 +24,10 @@ class ConversationStorageTests(unittest.TestCase):
         self.database_url = self.engine.url
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def test_history_survives_reopening_database(self) -> None:
-        with Session(self.engine) as session:
-            conversation_id = conversation_service.create_conversation(session)
+        conversation_id = add_conversation(sessionmaker(bind=self.engine))
 
         tool_call = {
             "id": "call_1",
@@ -41,17 +46,18 @@ class ConversationStorageTests(unittest.TestCase):
             )
         self.assertEqual(count, 4)
 
-        self.engine.dispose()
-        self.engine = create_engine(self.database_url)
-        with Session(self.engine) as session:
-            conversation = conversation_service.load_history(session, conversation_id)
+        reopened_engine = create_engine(self.database_url)
+        try:
+            with Session(reopened_engine) as session:
+                conversation = conversation_service.load_history(session, conversation_id)
+        finally:
+            reopened_engine.dispose()
         self.assertEqual(conversation.conversation_id, conversation_id)
         self.assertEqual(conversation.message_count, 4)
         self.assertEqual(conversation.to_llm_history(), messages)
 
     def test_stale_append_and_system_message_are_rejected(self) -> None:
-        with Session(self.engine) as session:
-            conversation_id = conversation_service.create_conversation(session)
+        conversation_id = add_conversation(sessionmaker(bind=self.engine))
 
         with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
             conversation_service.append_messages(
@@ -87,8 +93,7 @@ class ConversationStorageTests(unittest.TestCase):
         )
 
     def test_processing_conversation_cannot_be_deleted(self) -> None:
-        with Session(self.engine) as session:
-            conversation_id = conversation_service.create_conversation(session)
+        conversation_id = add_conversation(sessionmaker(bind=self.engine))
         request_id = str(uuid4())
         chat_turn_service.acquire_turn(
             request_id, "正在处理", conversation_id, sessionmaker(bind=self.engine)

@@ -92,51 +92,43 @@ async def run_case(
     run_now = local_now(evaluation_now)
 
     with isolated_engine() as engine:
+        session_factory = sessionmaker(bind=engine)
+        context = ScenarioContext(session_factory, run_now, race_preference)
+        initial_tasks = []
+        run_error = None
         try:
-            session_factory = sessionmaker(bind=engine)
-            context = ScenarioContext(session_factory, run_now, race_preference)
-            initial_tasks = []
-            run_error = None
-            try:
-                seed_case(case_id, context)
-                initial_tasks = collect_state(session_factory, [])["tasks"]
-                await execute_case(case_id, context)
-            except Exception as exc:
-                run_error = f"{type(exc).__name__}: {exc}"
+            seed_case(case_id, context)
+            initial_tasks = collect_state(session_factory, [])["tasks"]
+            await execute_case(case_id, context)
+        except Exception as exc:
+            run_error = f"{type(exc).__name__}: {exc}"
 
-            final_state = collect_state(session_factory, context.turns)
-            last_turn = context.turns[-1] if context.turns else {}
-            return {
-                "case_id": case_id,
-                "case_name": CASE_NAMES[case_id],
-                "variant": (
-                    f"{race_preference}_first" if race_preference
-                    else "simultaneous" if case_id == "14" else None
-                ),
-                "planned_user_messages": CASE_MESSAGES[case_id],
-                "evaluation_now": run_now.isoformat(timespec="seconds"),
-                "clock_mode": "fixed_evaluation",
-                "model": get_model_config()["model"],
-                "initial_tasks": initial_tasks,
-                "turns": context.turns,
-                "external_events": context.external_events,
-                "tasks": final_state["tasks"],
-                "actions": final_state["actions"],
-                "audit_events": final_state["audit_events"],
-                "run_error": run_error,
-                # Keep the single-turn fields convenient for the first case.
-                "request_id": last_turn.get("request_id"),
-                "conversation_id": context.conversation_id,
-                "chat_turn_status": last_turn.get("status"),
-                "reply": last_turn.get("reply"),
-                "messages": last_turn.get("messages", []),
-            }
-        finally:
-            engine.dispose()
-
-
-async def run_case_01(evaluation_now: datetime | None = None) -> dict:
-    return await run_case("01", evaluation_now)
+        final_state = collect_state(session_factory, context.turns)
+        last_turn = context.turns[-1] if context.turns else {}
+        return {
+            "case_id": case_id,
+            "case_name": CASE_NAMES[case_id],
+            "variant": (
+                f"{race_preference}_first" if race_preference
+                else "simultaneous" if case_id == "14" else None
+            ),
+            "planned_user_messages": CASE_MESSAGES[case_id],
+            "evaluation_now": run_now.isoformat(timespec="seconds"),
+            "model": get_model_config()["model"],
+            "initial_tasks": initial_tasks,
+            "turns": context.turns,
+            "external_events": context.external_events,
+            "tasks": final_state["tasks"],
+            "actions": final_state["actions"],
+            "audit_events": final_state["audit_events"],
+            "run_error": run_error,
+            # Keep the single-turn fields convenient for the first case.
+            "request_id": last_turn.get("request_id"),
+            "conversation_id": context.conversation_id,
+            "chat_turn_status": last_turn.get("status"),
+            "reply": last_turn.get("reply"),
+            "messages": last_turn.get("messages", []),
+        }
 
 
 def summarize(report: dict) -> None:

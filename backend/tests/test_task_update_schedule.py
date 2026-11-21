@@ -4,7 +4,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from backend.app.db.isolated import isolated_engine
-from backend.app.models.task import TaskORM
 from backend.app.schemas.task import TaskCreate, TaskUpdate
 from backend.app.services import action_service, task_service
 
@@ -15,7 +14,6 @@ class TaskUpdateScheduleTests(unittest.TestCase):
         self.engine = self.database.__enter__()
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def create(self, title: str, start: str):
@@ -157,16 +155,6 @@ class TaskUpdateScheduleTests(unittest.TestCase):
         self.confirm(proposal.id)
         self.assertIsNone(self.get(task.id).due_at)
         self.assertIsNone(self.get(task.id).duration_minutes)
-
-    def test_legacy_task_without_times_can_still_be_renamed(self) -> None:
-        with Session(self.engine) as session, session.begin():
-            legacy = TaskORM(title="旧任务", priority="medium", status="todo", version=1)
-            session.add(legacy)
-            session.flush()
-            task_id = legacy.id
-        proposal = self.propose(task_id, title="旧任务改名")
-        self.confirm(proposal.id)
-        self.assertEqual(self.get(task_id).title, "旧任务改名")
 
 
 if __name__ == "__main__":

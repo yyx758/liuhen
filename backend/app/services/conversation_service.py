@@ -4,7 +4,6 @@ import json
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -27,19 +26,6 @@ def normalize_message(message: dict[str, Any]) -> dict[str, Any]:
         return json.loads(json.dumps(data, ensure_ascii=False))
     except (ValidationError, TypeError, ValueError) as exc:
         raise HTTPException(422, "会话消息不合法") from exc
-
-
-def create_conversation(session: Session) -> str:
-    conversation_id = str(uuid4())
-    now = now_timestamp()
-    with session.begin():
-        session.add(ConversationORM(
-            id=conversation_id,
-            created_at=now,
-            updated_at=now,
-            message_count=0,
-        ))
-    return conversation_id
 
 
 def load_history(session: Session, conversation_id: str) -> ConversationRead:
