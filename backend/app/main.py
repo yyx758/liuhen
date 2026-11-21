@@ -6,11 +6,12 @@ from contextlib import asynccontextmanager, suppress
 import uvicorn
 from fastapi import FastAPI
 
-from backend.app.api import tasks, actions, chat, audit
+from backend.app.api import auth, tasks, actions, chat, audit
+from backend.app.api.security import check_origin
 from backend.app.db.migrations import ensure_schema_current
 from backend.app.db.session import engine
 from backend.app.db.session import SessionLocal
-from backend.app.services import action_service
+from backend.app.services import action_service, auth_service
 
 
 logger = logging.getLogger(__name__)
@@ -21,12 +22,18 @@ def expire_due_proposals() -> int:
         return action_service.purge_expired_actions(session)
 
 
-async def proposal_expiry_loop() -> None:
+def purge_expired_sessions() -> int:
+    with SessionLocal() as session:
+        return auth_service.purge_expired_sessions(session)
+
+
+async def expiry_loop() -> None:
     while True:
-        try:
-            await asyncio.to_thread(expire_due_proposals)
-        except Exception:
-            logger.exception("提案过期清理失败")
+        for job, label in ((expire_due_proposals, "提案过期清理"), (purge_expired_sessions, "登录会话过期清理")):
+            try:
+                await asyncio.to_thread(job)
+            except Exception:
+                logger.exception("%s失败", label)
         await asyncio.sleep(60)
 
 
@@ -35,7 +42,7 @@ async def lifespan(app: FastAPI):
 
     # 表结构由 Alembic 迁移维护；版本不是最新时拒绝启动，避免新代码跑在旧表上。
     ensure_schema_current(engine)
-    expiry_task = asyncio.create_task(proposal_expiry_loop())
+    expiry_task = asyncio.create_task(expiry_loop())
     try:
         yield
     finally:
@@ -50,7 +57,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.middleware("http")(check_origin)
+
 # 注册路由模块
+app.include_router(auth.router)
 app.include_router(tasks.router)
 app.include_router(actions.router)
 app.include_router(chat.router)

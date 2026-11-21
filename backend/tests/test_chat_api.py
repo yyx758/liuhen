@@ -131,6 +131,8 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
                 content=reply,
             )
 
+        app.dependency_overrides[current_user_id] = lambda: self.user_id
+        self.addCleanup(app.dependency_overrides.clear)
         with (
             patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm),
             patch.object(chat_service, "SessionLocal", self.session_factory),

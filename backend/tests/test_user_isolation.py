@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.api import actions, audit, chat, tasks
-from backend.app.api.deps import current_user_id
+from backend.app.api.deps import current_session_user, current_user_id
 from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.db.session import get_db
 from backend.app.main import app as main_app
@@ -192,19 +192,25 @@ class UserIsolationTests(unittest.TestCase):
 
 
 class RouteProtectionTests(unittest.TestCase):
-    def test_every_business_route_depends_on_current_user(self) -> None:
-        def depends_on_user(dependant) -> bool:
-            return any(
-                dep.call is current_user_id or depends_on_user(dep)
-                for dep in dependant.dependencies
-            )
+    # 不需要登录的接口；新增公开接口必须在这里显式登记。
+    PUBLIC = {("POST", "/auth/login"), ("POST", "/auth/logout")}
 
-        unprotected = [
-            f"{sorted(route.methods)} {route.path}"
-            for route in main_app.routes
-            if isinstance(route, APIRoute) and not depends_on_user(route.dependant)
-        ]
-        self.assertEqual(unprotected, [])
+    def test_every_route_requires_login(self) -> None:
+        def depends_on(dependant, target) -> bool:
+            return any(dep.call is target or depends_on(dep, target) for dep in dependant.dependencies)
+
+        problems = []
+        for route in main_app.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            for method in route.methods:
+                if (method, route.path) in self.PUBLIC:
+                    continue
+                # 业务接口还必须拒绝"待改密"状态，所以要求依赖 current_user_id。
+                target = current_session_user if route.path.startswith("/auth/") else current_user_id
+                if not depends_on(route.dependant, target):
+                    problems.append(f"{method} {route.path}")
+        self.assertEqual(problems, [])
 
 
 if __name__ == "__main__":
