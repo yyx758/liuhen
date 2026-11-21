@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from backend.app.agent.tool_registry import ToolRegistry
-from backend.app.db.isolated import isolated_engine
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.models.task import TaskORM
 from backend.app.services.task_service import list_tasks
 
@@ -18,6 +18,7 @@ class TaskScheduleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
         self.registry = ToolRegistry()
 
     def tearDown(self) -> None:
@@ -30,7 +31,7 @@ class TaskScheduleTests(unittest.TestCase):
             "duration_minutes": duration_minutes,
         }, ensure_ascii=False)
         with Session(self.engine) as session:
-            return json.loads(self.registry.execute_tool("create_task", arguments, session))
+            return json.loads(self.registry.execute_tool("create_task", arguments, session, user_id=self.user_id))
 
     def test_requires_a_time_and_valid_duration(self) -> None:
         with Session(self.engine) as session:
@@ -41,7 +42,7 @@ class TaskScheduleTests(unittest.TestCase):
                 {"title": "零时长", "start_at": "2026-11-18T14:00:00+08:00", "duration_minutes": 0},
             ):
                 with self.subTest(data=data), self.assertRaises(ValidationError):
-                    self.registry.execute_tool("create_task", json.dumps(data, ensure_ascii=False), session)
+                    self.registry.execute_tool("create_task", json.dumps(data, ensure_ascii=False), session, user_id=self.user_id)
 
     def test_overlap_rejected_but_adjacent_interval_allowed(self) -> None:
         first = self.create("A", "2026-11-18T14:00:00", 60)
@@ -56,7 +57,7 @@ class TaskScheduleTests(unittest.TestCase):
         second = self.create("B", "2026-11-18T15:00:00+08:00", 30)
         self.assertNotEqual(first["id"], second["id"])
         with Session(self.engine) as session:
-            self.assertEqual(len(list_tasks(session)), 2)
+            self.assertEqual(len(list_tasks(session, user_id=self.user_id)), 2)
 
     def test_missing_duration_stays_empty(self) -> None:
         arguments = json.dumps({
@@ -64,7 +65,7 @@ class TaskScheduleTests(unittest.TestCase):
             "start_at": "2026-11-18T14:00:00",
         }, ensure_ascii=False)
         with Session(self.engine) as session:
-            task = json.loads(self.registry.execute_tool("create_task", arguments, session))
+            task = json.loads(self.registry.execute_tool("create_task", arguments, session, user_id=self.user_id))
         self.assertIsNone(task["duration_minutes"])
         self.assertIsNone(task["end_at"])
 
@@ -72,7 +73,7 @@ class TaskScheduleTests(unittest.TestCase):
         with Session(self.engine) as session:
             due_only = json.loads(self.registry.execute_tool("create_task", json.dumps({
                 "title": "截止任务", "due_at": "2026-11-18T15:00:00+08:00",
-            }, ensure_ascii=False), session))
+            }, ensure_ascii=False), session, user_id=self.user_id))
         self.assertIsNone(due_only["start_at"])
         self.assertIsNone(due_only["duration_minutes"])
         self.assertEqual(due_only["due_at"], "2026-11-18T15:00:00+08:00")
@@ -81,7 +82,7 @@ class TaskScheduleTests(unittest.TestCase):
         with Session(self.engine) as session:
             start_only = json.loads(self.registry.execute_tool("create_task", json.dumps({
                 "title": "只有开始", "start_at": "2026-11-18T14:30:00+08:00",
-            }, ensure_ascii=False), session))
+            }, ensure_ascii=False), session, user_id=self.user_id))
         self.assertEqual(start_only["start_at"], "2026-11-18T14:30:00+08:00")
         self.assertIsNone(start_only["end_at"])
         self.assertIsNone(start_only["duration_minutes"])
@@ -94,7 +95,7 @@ class TaskScheduleTests(unittest.TestCase):
             "due_at": "2026-11-17T12:00:00+08:00",
         }, ensure_ascii=False)
         with Session(self.engine) as session:
-            task = json.loads(self.registry.execute_tool("create_task", arguments, session))
+            task = json.loads(self.registry.execute_tool("create_task", arguments, session, user_id=self.user_id))
         self.assertEqual(task["end_at"], "2026-11-18T15:00:00+08:00")
         self.assertEqual(task["due_at"], "2026-11-17T12:00:00+08:00")
 
@@ -116,10 +117,12 @@ class TaskScheduleTests(unittest.TestCase):
                     version=1,
                     start_at=datetime(2026, 11, 18, 7, tzinfo=timezone.utc).replace(tzinfo=None),
                     end_at=datetime(2026, 11, 18, 6, tzinfo=timezone.utc).replace(tzinfo=None),
+                    user_id=self.user_id,
                 ))
 
     def test_concurrent_creation_keeps_one_task(self) -> None:
         with isolated_engine() as engine:
+            user_id = create_user(engine, "bob")
             barrier = Barrier(2)
 
             def create_once(title: str) -> str:
@@ -131,7 +134,7 @@ class TaskScheduleTests(unittest.TestCase):
                 barrier.wait()
                 with Session(engine) as session:
                     try:
-                        self.registry.execute_tool("create_task", arguments, session)
+                        self.registry.execute_tool("create_task", arguments, session, user_id=user_id)
                         return "created"
                     except HTTPException as exc:
                         self.assertEqual(exc.status_code, 409)

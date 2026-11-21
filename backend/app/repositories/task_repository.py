@@ -15,22 +15,24 @@ def insert_task(session: Session, task: TaskORM) -> TaskORM:
     return task
 
 
-# 查询所有待办
-def list_tasks(session: Session) -> list[TaskORM]:
-    stmt = select(TaskORM).order_by(TaskORM.id)
+# 查询某个用户的所有待办
+def list_tasks(session: Session, *, user_id: int) -> list[TaskORM]:
+    stmt = select(TaskORM).where(TaskORM.user_id == user_id).order_by(TaskORM.id)
     return list(session.scalars(stmt).all())
 
 
-# 按主键查询
+# 按主键查询；不属于该用户时与不存在一样返回 None
 def get_task_by_id(
     session: Session,
     task_id: int,
     *,
+    user_id: int,
     for_update: bool = False,
 ) -> TaskORM | None:
+    stmt = select(TaskORM).where(TaskORM.id == task_id, TaskORM.user_id == user_id)
     if for_update:
-        return session.scalar(select(TaskORM).where(TaskORM.id == task_id).with_for_update())
-    return session.get(TaskORM, task_id)
+        stmt = stmt.with_for_update()
+    return session.scalar(stmt)
 
 
 def find_overlapping_task(
@@ -38,10 +40,13 @@ def find_overlapping_task(
     start_at: datetime,
     end_at: datetime,
     exclude_task_id: int | None = None,
+    *,
+    user_id: int,
 ) -> TaskORM | None:
     stmt = (
         select(TaskORM)
         .where(
+            TaskORM.user_id == user_id,
             TaskORM.status == "todo",
             TaskORM.start_at < end_at,
             TaskORM.end_at > start_at

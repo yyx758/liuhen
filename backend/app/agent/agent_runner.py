@@ -19,11 +19,12 @@ def execute_one_tool(
     name: str,
     arguments: str,
     proposal_batch_id: str,
+    user_id: int,
 ) -> str:
     # Session 在工作线程中创建、使用和关闭
     with SessionLocal() as session:
         session.info["proposal_batch_id"] = proposal_batch_id
-        return registry.execute_tool(name, arguments, session)
+        return registry.execute_tool(name, arguments, session, user_id=user_id)
 
 
 async def run_agent_loop(
@@ -34,8 +35,9 @@ async def run_agent_loop(
     persist_message: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     durable_tool: Callable[[ToolRegistry, str, str, str], Awaitable[str]] | None = None,
     evaluation_now: datetime | None = None,
+    user_id: int,
 ) -> str:
-    """处理一轮用户发言；调用方持有同一会话的 history。"""
+    """处理一轮用户发言；调用方持有同一会话的 history。工具只操作 user_id 的数据。"""
     if history is None:
         history = []
 
@@ -168,7 +170,7 @@ async def run_agent_loop(
                 try:
                     if durable_tool is None:
                         tool_output = await asyncio.to_thread(
-                            execute_one_tool, registry, name, arguments, proposal_batch_id
+                            execute_one_tool, registry, name, arguments, proposal_batch_id, user_id
                         )
                     else:
                         tool_output = await durable_tool(registry, name, arguments, call["id"])
@@ -215,11 +217,3 @@ async def run_agent_loop(
         await record({"role": "assistant", "content": reply})
         return reply
     raise RuntimeError("模型调用轮数已达上限")
-
-
-if __name__ == "__main__":
-    answer = asyncio.run(
-        run_agent_loop("明天学Python的任务调整到晚上七点")
-    )
-    if answer is not None:
-        print("模型回复：", answer)

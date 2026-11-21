@@ -1,6 +1,6 @@
 """Append-only business operation history. Task rows may be deleted later."""
 
-from sqlalchemy import CheckConstraint, Index, JSON, String
+from sqlalchemy import CheckConstraint, ForeignKey, Index, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import Base
@@ -10,6 +10,7 @@ class OperationEventORM(Base):
     __tablename__ = "operation_events"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     task_id: Mapped[int] = mapped_column(nullable=False)
     action_id: Mapped[int | None] = mapped_column(nullable=True)
@@ -34,4 +35,5 @@ class OperationEventORM(Base):
         Index("ix_operation_events_task_id_id", "task_id", "id"),
         Index("ix_operation_events_action_id_id", "action_id", "id"),
         Index("ix_operation_events_request_id", "request_id"),
+        Index("ix_operation_events_user_id_id", "user_id", "id"),
     )

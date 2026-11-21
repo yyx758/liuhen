@@ -36,7 +36,7 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
             def propose(title: str):
                 with factory() as session:
                     return action_service.propose_update(
-                        session, task_id, TaskUpdate(title=title),
+                        session, task_id, TaskUpdate(title=title), user_id=context.user_id,
                     )
 
             with fixed_now(frozen):

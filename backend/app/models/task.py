@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, CheckConstraint, text
+from sqlalchemy import String, DateTime, CheckConstraint, ForeignKey, Index, text
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -13,6 +13,9 @@ class TaskORM(Base):
     id: Mapped[int] = mapped_column(
         primary_key=True
     )
+
+    # 任务归属；所有按 ID 或列表的查询都必须带上 user_id 条件。
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
 
     title: Mapped[str] = mapped_column(
         String(100),
@@ -47,9 +50,12 @@ class TaskORM(Base):
             "end_at IS NULL OR (start_at IS NOT NULL AND end_at > start_at)",
             name="ck_task_time_range"
         ),
+        # 同一用户的待办时间段不能重叠；不同用户互不影响（user_id 的 "=" 需要 btree_gist 扩展）。
         ExcludeConstraint(
+            ("user_id", "="),
             (text("tsrange(start_at, end_at, '[)')"), "&&"),
             where=text("status = 'todo' AND start_at IS NOT NULL AND end_at IS NOT NULL"),
             name="ex_tasks_no_overlap",
         ),
+        Index("ix_tasks_user_id_id", "user_id", "id"),
     )

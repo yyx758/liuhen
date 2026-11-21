@@ -26,6 +26,7 @@ async def send_message(
     conversation_id: str | None = None,
     request_id: str | None = None,
     *,
+    user_id: int,
     session_factory: Callable[[], Session] | None = None,
     evaluation_now: datetime | None = None,
 ) -> tuple[str, str]:
@@ -36,7 +37,7 @@ async def send_message(
     request_id = request_id or str(uuid4())
     turn = await asyncio.to_thread(
         chat_turn_service.acquire_turn,
-        request_id, user_text, conversation_id, factory,
+        request_id, user_text, conversation_id, factory, user_id=user_id,
     )
     if turn.answer is not None:
         return turn.conversation_id, turn.answer
@@ -63,6 +64,7 @@ async def send_message(
             persist_message=persist_message,
             durable_tool=durable_tool,
             evaluation_now=evaluation_now,
+            user_id=user_id,
         )
         await asyncio.to_thread(
             chat_turn_service.complete_turn,

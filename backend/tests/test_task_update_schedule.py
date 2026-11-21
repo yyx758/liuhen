@@ -3,7 +3,7 @@ import unittest
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from backend.app.db.isolated import isolated_engine
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.schemas.task import TaskCreate, TaskUpdate
 from backend.app.services import action_service, task_service
 
@@ -12,6 +12,7 @@ class TaskUpdateScheduleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
 
     def tearDown(self) -> None:
         self.database.__exit__(None, None, None)
@@ -19,22 +20,22 @@ class TaskUpdateScheduleTests(unittest.TestCase):
     def create(self, title: str, start: str):
         with Session(self.engine) as session:
             return task_service.create_task(
-                TaskCreate(title=title, start_at=start, duration_minutes=60), session
+                TaskCreate(title=title, start_at=start, duration_minutes=60), session, user_id=self.user_id
             )
 
     def propose(self, task_id: int, **changes):
         with Session(self.engine) as session:
             return action_service.propose_update(
-                session, task_id, TaskUpdate(**changes)
+                session, task_id, TaskUpdate(**changes), user_id=self.user_id
             )
 
     def confirm(self, action_id: int):
         with Session(self.engine) as session:
-            return action_service.confirm_action(session, action_id)
+            return action_service.confirm_action(session, action_id, user_id=self.user_id)
 
     def get(self, task_id: int):
         with Session(self.engine) as session:
-            return task_service.get_task(task_id, session)
+            return task_service.get_task(task_id, session, user_id=self.user_id)
 
     def test_start_change_keeps_duration_until_confirmation(self) -> None:
         task = self.create("学习 Python", "2030-01-02T14:00:00+08:00")
@@ -83,7 +84,7 @@ class TaskUpdateScheduleTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(self.get(task.id).start_at, task.start_at)
         with Session(self.engine) as session:
-            self.assertEqual(action_service.get_action(session, proposal.id).status, "conflicted")
+            self.assertEqual(action_service.get_action(session, proposal.id, user_id=self.user_id).status, "conflicted")
 
     def test_done_to_todo_checks_occupied_time(self) -> None:
         task = self.create("A", "2030-01-02T14:00:00+08:00")
@@ -131,7 +132,7 @@ class TaskUpdateScheduleTests(unittest.TestCase):
     def test_start_only_task_can_be_rescheduled_and_given_duration(self) -> None:
         with Session(self.engine) as session:
             task = task_service.create_task(
-                TaskCreate(title="只有开始", start_at="2030-01-02T14:00:00+08:00"), session
+                TaskCreate(title="只有开始", start_at="2030-01-02T14:00:00+08:00"), session, user_id=self.user_id
             )
         moved = self.propose(task.id, start_at="2030-01-02T16:00:00+08:00")
         self.assertIsNone(moved.after.duration_minutes)
@@ -146,7 +147,7 @@ class TaskUpdateScheduleTests(unittest.TestCase):
     def test_due_only_task_keeps_at_least_one_time(self) -> None:
         with Session(self.engine) as session:
             task = task_service.create_task(
-                TaskCreate(title="只有截止", due_at="2030-01-03T18:00:00+08:00"), session
+                TaskCreate(title="只有截止", due_at="2030-01-03T18:00:00+08:00"), session, user_id=self.user_id
             )
         with self.assertRaises(HTTPException) as raised:
             self.propose(task.id, due_at=None)

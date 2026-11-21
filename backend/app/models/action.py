@@ -1,7 +1,9 @@
 from sqlalchemy import (
     String,
     JSON,
-    CheckConstraint
+    CheckConstraint,
+    ForeignKey,
+    Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +17,9 @@ class PendingActionORM(Base):
     id: Mapped[int] = mapped_column(
         primary_key=True
     )
+
+    # 提案归属，与所操作任务的 user_id 一致
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
 
     # 被操作的任务 ID
     task_id: Mapped[int] = mapped_column(
@@ -75,5 +80,6 @@ class PendingActionORM(Base):
             "'pending', 'executed', 'cancelled', "
             "'expired', 'conflicted', 'replaced', 'failed')",
             name="ck_action_status"
-        )
+        ),
+        Index("ix_pending_actions_user_id_status", "user_id", "status"),
     )

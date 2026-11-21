@@ -51,9 +51,11 @@ def create_task(
     data: TaskCreate,
     session: Session,
     request_id: str | None = None,
+    *,
+    user_id: int,
 ) -> TaskRead:
     try:
-        return _create_task(data, session, request_id)
+        return _create_task(data, session, request_id, user_id)
     except IntegrityError as exc:
         if getattr(exc.orig, "sqlstate", None) == "23P01":
             raise HTTPException(409, "时间与已有任务冲突") from exc
@@ -64,6 +66,7 @@ def _create_task(
     data: TaskCreate,
     session: Session,
     request_id: str | None,
+    user_id: int,
 ) -> TaskRead:
 
     # Service 管理事务
@@ -82,6 +85,9 @@ def _create_task(
             ).hexdigest()
             previous = session.get(TaskCreateRequestORM, request_id)
             if previous is not None:
+                # 幂等键全局唯一：别人用过的键不能回放出别人的任务快照。
+                if previous.user_id != user_id:
+                    raise HTTPException(409, "幂等键已被使用，请换一个新的幂等键")
                 if previous.payload_hash != payload_hash:
                     raise HTTPException(409, "幂等键已用于不同的创建请求")
                 return TaskRead.model_validate(previous.result_snapshot)
@@ -94,12 +100,13 @@ def _create_task(
             except OverflowError as exc:
                 raise HTTPException(422, "任务时长超出可表示的范围") from exc
 
-            conflict = task_repository.find_overlapping_task(session, start_at, end_at)
+            conflict = task_repository.find_overlapping_task(session, start_at, end_at, user_id=user_id)
             if conflict is not None:
                 raise HTTPException(409, f"时间与任务 {conflict.id} 冲突")
 
         # DTO 转 ORM
         task = TaskORM(
+            user_id=user_id,
             title=data.title,
             priority=data.priority,
             due_at=to_db_utc(data.due_at) if data.due_at is not None else None,
@@ -113,13 +120,14 @@ def _create_task(
         # ORM 转响应 DTO
         result = to_task_read(task)
         audit_service.record_event(
-            session, "task_created", task.id,
+            session, "task_created", task.id, user_id=user_id,
             details={"task": result.model_dump(mode="json")},
             request_id=request_id,
         )
         if request_id is not None:
             session.add(TaskCreateRequestORM(
                 request_id=request_id,
+                user_id=user_id,
                 payload_hash=payload_hash,
                 result_snapshot=result.model_dump(mode="json"),
                 created_at=int(datetime.now(timezone.utc).timestamp()),
@@ -130,9 +138,9 @@ def _create_task(
 
 
 # 查询所有待办
-def list_tasks(session: Session) -> list[TaskRead]:
+def list_tasks(session: Session, *, user_id: int) -> list[TaskRead]:
 
-    tasks = task_repository.list_tasks(session)
+    tasks = task_repository.list_tasks(session, user_id=user_id)
 
     return [to_task_read(task) for task in tasks]
 
@@ -140,12 +148,15 @@ def list_tasks(session: Session) -> list[TaskRead]:
 # 根据 ID 查询待办
 def get_task(
     task_id: int,
-    session: Session
+    session: Session,
+    *,
+    user_id: int,
 ) -> TaskRead:
 
     task = task_repository.get_task_by_id(
         session,
-        task_id
+        task_id,
+        user_id=user_id,
     )
 
     if task is None:
@@ -157,7 +168,9 @@ def get_task(
     return to_task_read(task)
 
 
-def _replace_pending_after_manual_change(session: Session, task_id: int, operation: str) -> None:
+def _replace_pending_after_manual_change(
+    session: Session, task_id: int, operation: str, *, user_id: int
+) -> None:
     # 手动写入已改变任务版本；旧的 Agent 提案不再适用。
     from backend.app.services import action_service
 
@@ -167,7 +180,7 @@ def _replace_pending_after_manual_change(session: Session, task_id: int, operati
         raise RuntimeError("手动操作后提案状态与审计记录不一致")
     for action in pending:
         audit_service.record_event(
-            session, "proposal_replaced", task_id, action_id=action.id,
+            session, "proposal_replaced", task_id, user_id=user_id, action_id=action.id,
             from_status="pending", to_status="replaced",
             reason="任务已被用户手动修改",
             details={"manual_operation": operation},
@@ -175,14 +188,14 @@ def _replace_pending_after_manual_change(session: Session, task_id: int, operati
 
 
 def update_task(
-    session: Session, task_id: int, data: TaskUpdate, expected_version: int
+    session: Session, task_id: int, data: TaskUpdate, expected_version: int, *, user_id: int
 ) -> TaskRead:
     from backend.app.services.action_service import build_updated_snapshot, find_schedule_conflict
 
     try:
         with session.begin():
             task = task_repository.get_task_by_id(
-                session, task_id, for_update=True
+                session, task_id, user_id=user_id, for_update=True
             )
             if task is None:
                 raise HTTPException(404, "待办不存在")
@@ -192,14 +205,14 @@ def update_task(
             after = build_updated_snapshot(before, data)
             if before.model_dump(exclude={"version"}) == after.model_dump(exclude={"version"}):
                 raise HTTPException(409, "修改前后没有变化")
-            conflict = find_schedule_conflict(session, task_id, after)
+            conflict = find_schedule_conflict(session, task_id, after, user_id=user_id)
             if conflict is not None:
                 raise HTTPException(409, f"时间与任务 {conflict.id} 冲突")
             if task_repository.update_if_version(session, task_id, expected_version, after) != 1:
                 raise HTTPException(409, "任务已变化，请刷新后重试")
-            _replace_pending_after_manual_change(session, task_id, "update")
+            _replace_pending_after_manual_change(session, task_id, "update", user_id=user_id)
             audit_service.record_event(
-                session, "task_updated", task_id,
+                session, "task_updated", task_id, user_id=user_id,
                 details={
                     "source": "manual",
                     "before": before.model_dump(mode="json"),
@@ -213,10 +226,10 @@ def update_task(
         raise
 
 
-def delete_task(session: Session, task_id: int, expected_version: int) -> None:
+def delete_task(session: Session, task_id: int, expected_version: int, *, user_id: int) -> None:
     with session.begin():
         task = task_repository.get_task_by_id(
-            session, task_id, for_update=True
+            session, task_id, user_id=user_id, for_update=True
         )
         if task is None:
             raise HTTPException(404, "待办不存在")
@@ -225,8 +238,8 @@ def delete_task(session: Session, task_id: int, expected_version: int) -> None:
             raise HTTPException(409, "任务已变化，请刷新后重试")
         if task_repository.delete_if_version(session, task_id, expected_version) != 1:
             raise HTTPException(409, "任务已变化，请刷新后重试")
-        _replace_pending_after_manual_change(session, task_id, "delete")
+        _replace_pending_after_manual_change(session, task_id, "delete", user_id=user_id)
         audit_service.record_event(
-            session, "task_deleted", task_id,
+            session, "task_deleted", task_id, user_id=user_id,
             details={"source": "manual", "before": before.model_dump(mode="json")},
         )

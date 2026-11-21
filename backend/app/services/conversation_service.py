@@ -45,7 +45,7 @@ def load_history(session: Session, conversation_id: str) -> ConversationRead:
     )
 
 
-def delete_conversation(session: Session, conversation_id: str) -> None:
+def delete_conversation(session: Session, conversation_id: str, *, user_id: int) -> None:
     """Remove chat content; keep only request IDs needed to reject replay."""
     with session.begin():
         # acquire_turn takes this lock before starting another turn.
@@ -58,7 +58,7 @@ def delete_conversation(session: Session, conversation_id: str) -> None:
             ConversationORM, conversation_id,
             with_for_update=True,
         )
-        if conversation is None:
+        if conversation is None or conversation.user_id != user_id:
             raise HTTPException(404, "会话不存在")
         active = session.scalar(
             select(ChatTurnORM.request_id).where(
@@ -74,7 +74,7 @@ def delete_conversation(session: Session, conversation_id: str) -> None:
         ).all()
         deleted_at = now_timestamp()
         session.add_all(
-            DeletedChatRequestORM(request_id=request_id, deleted_at=deleted_at)
+            DeletedChatRequestORM(request_id=request_id, user_id=user_id, deleted_at=deleted_at)
             for request_id in request_ids
         )
         session.execute(delete(ChatTurnORM).where(ChatTurnORM.conversation_id == conversation_id))

@@ -5,15 +5,15 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.db.isolated import isolated_engine
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.models.conversation import ConversationORM
 from backend.app.services import chat_turn_service, conversation_service
 
 
-def add_conversation(session_factory) -> str:
+def add_conversation(session_factory, user_id: int) -> str:
     conversation_id = str(uuid4())
     with session_factory() as session, session.begin():
-        session.add(ConversationORM(id=conversation_id, created_at=0, updated_at=0, message_count=0))
+        session.add(ConversationORM(id=conversation_id, created_at=0, updated_at=0, message_count=0, user_id=user_id))
     return conversation_id
 
 
@@ -21,13 +21,14 @@ class ConversationStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
         self.database_url = self.engine.url
 
     def tearDown(self) -> None:
         self.database.__exit__(None, None, None)
 
     def test_history_survives_reopening_database(self) -> None:
-        conversation_id = add_conversation(sessionmaker(bind=self.engine))
+        conversation_id = add_conversation(sessionmaker(bind=self.engine), self.user_id)
 
         tool_call = {
             "id": "call_1",
@@ -57,7 +58,7 @@ class ConversationStorageTests(unittest.TestCase):
         self.assertEqual(conversation.to_llm_history(), messages)
 
     def test_stale_append_and_system_message_are_rejected(self) -> None:
-        conversation_id = add_conversation(sessionmaker(bind=self.engine))
+        conversation_id = add_conversation(sessionmaker(bind=self.engine), self.user_id)
 
         with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
             conversation_service.append_messages(
@@ -93,13 +94,13 @@ class ConversationStorageTests(unittest.TestCase):
         )
 
     def test_processing_conversation_cannot_be_deleted(self) -> None:
-        conversation_id = add_conversation(sessionmaker(bind=self.engine))
+        conversation_id = add_conversation(sessionmaker(bind=self.engine), self.user_id)
         request_id = str(uuid4())
         chat_turn_service.acquire_turn(
-            request_id, "正在处理", conversation_id, sessionmaker(bind=self.engine)
+            request_id, "正在处理", conversation_id, sessionmaker(bind=self.engine), user_id=self.user_id
         )
         with Session(self.engine) as session, self.assertRaises(HTTPException) as raised:
-            conversation_service.delete_conversation(session, conversation_id)
+            conversation_service.delete_conversation(session, conversation_id, user_id=self.user_id)
         self.assertEqual(raised.exception.status_code, 409)
         with Session(self.engine) as session:
             self.assertIsNotNone(session.get(ConversationORM, conversation_id))

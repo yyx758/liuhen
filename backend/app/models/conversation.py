@@ -10,6 +10,7 @@ class ConversationORM(Base):
     __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     created_at: Mapped[int] = mapped_column(nullable=False)
     updated_at: Mapped[int] = mapped_column(nullable=False)
     # 已保存的消息数，也是追加消息时使用的乐观并发版本。

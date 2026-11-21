@@ -12,6 +12,8 @@ from sqlalchemy import select
 from backend.app.api import actions as actions_api
 from backend.app.config.clock import fixed_now
 from backend.app.config.settings import USER_TIMEZONE
+from backend.app.api.deps import current_user_id
+from backend.app.db.isolated import create_user
 from backend.app.db.session import get_db
 from backend.app.models.action import PendingActionORM
 from backend.app.models.task import TaskORM
@@ -77,6 +79,7 @@ class ScenarioContext:
         race_preference: str | None = None,
     ):
         self.session_factory = session_factory
+        self.user_id = create_user(session_factory.kw["bind"], "eval_user")
         self.evaluation_now = evaluation_now
         self.conversation_id: str | None = None
         self.turns: list[dict] = []
@@ -86,6 +89,7 @@ class ScenarioContext:
         self.action_api = FastAPI()
         self.action_api.include_router(actions_api.router)
         self.action_api.dependency_overrides[get_db] = self.provide_session
+        self.action_api.dependency_overrides[current_user_id] = lambda: self.user_id
 
     def provide_session(self):
         with self.session_factory() as session:
@@ -107,6 +111,7 @@ class ScenarioContext:
         )
         with self.session_factory() as session, session.begin():
             task = TaskORM(
+                user_id=self.user_id,
                 title=title, priority=priority, status=status, version=1,
                 start_at=start_db, end_at=end_db,
                 due_at=to_db_utc(due_at) if due_at is not None else None,
@@ -128,6 +133,7 @@ class ScenarioContext:
             with fixed_now(self.evaluation_now):
                 conversation_id, reply = await chat_service.send_message(
                     user_text, self.conversation_id, request_id,
+                    user_id=self.user_id,
                     session_factory=self.session_factory,
                     evaluation_now=self.evaluation_now,
                 )

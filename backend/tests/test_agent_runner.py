@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.agent.tool_registry import ToolRegistry
-from backend.app.db.isolated import isolated_engine
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.models.action import PendingActionORM
 from backend.app.models.task import TaskORM
 from backend.app.services import chat_service, conversation_service
@@ -19,6 +19,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
         self.session_factory = sessionmaker(bind=self.engine)
         self.session_patch = patch.object(
             agent_runner, "SessionLocal", self.session_factory
@@ -64,7 +65,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             )
 
         with patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm):
-            answer = await agent_runner.run_agent_loop("后天下午两点学习 Python，一小时", [])
+            answer = await agent_runner.run_agent_loop("后天下午两点学习 Python，一小时", [], user_id=self.user_id)
 
         self.assertEqual(len(messages_seen), 2)
         self.assertEqual(messages_seen[1][-1]["role"], "tool")
@@ -94,6 +95,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
                 version=1,
                 start_at=datetime(2030, 1, 2, 6),
                 end_at=datetime(2030, 1, 2, 7),
+                user_id=self.user_id,
             ))
 
         answer, messages = await self.run_with_tool_call("冲突任务", "这个时间已有任务，未创建")
@@ -115,14 +117,14 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             "start_at": "2030-01-02T14:00:00+08:00",
         }, ensure_ascii=False)
         with Session(self.engine) as session:
-            created = json.loads(registry.execute_tool("create_task", create_args, session))
+            created = json.loads(registry.execute_tool("create_task", create_args, session, user_id=self.user_id))
         task_id = created["id"]
 
         # 模拟下一轮：新注册表仍可用对话中已明确的 ID 查询当前数据库状态。
         registry = ToolRegistry()
         with Session(self.engine) as session:
             found = json.loads(registry.execute_tool(
-                "get_task", json.dumps({"task_id": task_id}), session
+                "get_task", json.dumps({"task_id": task_id}), session, user_id=self.user_id
             ))
         self.assertEqual(found["title"], "学习 Python")
 
@@ -134,7 +136,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             },
         }, ensure_ascii=False)
         with Session(self.engine) as session:
-            update = json.loads(registry.execute_tool("propose_update", update_args, session))
+            update = json.loads(registry.execute_tool("propose_update", update_args, session, user_id=self.user_id))
         self.assertEqual(len(update), 2)
         rename, reschedule = update
         self.assertEqual([item["status"] for item in update], ["pending", "pending"])
@@ -145,7 +147,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reschedule["after"]["duration_minutes"])
         with Session(self.engine) as session:
             current_action = json.loads(registry.execute_tool(
-                "get_action", json.dumps({"action_id": rename["id"]}), session
+                "get_action", json.dumps({"action_id": rename["id"]}), session, user_id=self.user_id
             ))
         self.assertEqual(current_action["status"], "pending")
         self.assertEqual(current_action["before"]["title"], "学习 Python")
@@ -156,12 +158,12 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with Session(self.engine) as session:
-            listed = json.loads(registry.execute_tool("list_tasks", "{}", session))
+            listed = json.loads(registry.execute_tool("list_tasks", "{}", session, user_id=self.user_id))
         self.assertEqual([task["id"] for task in listed], [task_id])
 
         with Session(self.engine) as session:
             deletion = json.loads(registry.execute_tool(
-                "propose_delete", json.dumps({"task_id": task_id}), session
+                "propose_delete", json.dumps({"task_id": task_id}), session, user_id=self.user_id
             ))
             task = session.get(TaskORM, task_id)
             self.assertEqual(task.title, "学习 Python")
@@ -170,7 +172,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(deletion["after"])
         with Session(self.engine) as session:
             replaced_actions = [json.loads(registry.execute_tool(
-                "get_action", json.dumps({"action_id": item["id"]}), session
+                "get_action", json.dumps({"action_id": item["id"]}), session, user_id=self.user_id
             )) for item in update]
         self.assertEqual([item["status"] for item in replaced_actions], ["replaced", "replaced"])
         self.assertIn(
@@ -187,6 +189,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
                 version=1,
                 start_at=datetime(2030, 1, 2, 6),
                 end_at=datetime(2030, 1, 2, 7),
+                user_id=self.user_id,
             ))
 
         calls = [
@@ -220,7 +223,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         history = []
         with patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm):
             answer = await agent_runner.run_agent_loop(
-                "把学习 Python 改名为复习 Python，并改到下午四点", history
+                "把学习 Python 改名为复习 Python，并改到下午四点", history, user_id=self.user_id
             )
 
         self.assertEqual(len(seen), 3)
@@ -245,6 +248,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             session.add(TaskORM(
                 title="旧标题", priority="medium", status="todo", version=1,
                 start_at=datetime(2030, 1, 2, 6),
+                user_id=self.user_id,
             ))
         calls = [
             {
@@ -276,7 +280,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             )
 
         with patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm):
-            answer = await agent_runner.run_agent_loop("改标题，并改到下午四点", [])
+            answer = await agent_runner.run_agent_loop("改标题，并改到下午四点", [], user_id=self.user_id)
 
         self.assertEqual(len(seen), 2)
         self.assertEqual(answer.count("提案 #"), 2)
@@ -302,8 +306,8 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm),
             patch.object(chat_service, "SessionLocal", self.session_factory),
         ):
-            conversation_id, first = await chat_service.send_message("把周会改名")
-            same_id, second = await chat_service.send_message("明天下午那条", conversation_id)
+            conversation_id, first = await chat_service.send_message("把周会改名", user_id=self.user_id)
+            same_id, second = await chat_service.send_message("明天下午那条", conversation_id, user_id=self.user_id)
 
         self.assertEqual(same_id, conversation_id)
         self.assertEqual(first, replies[0])

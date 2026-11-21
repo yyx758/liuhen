@@ -6,7 +6,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.db.isolated import isolated_engine
+from backend.app.api.deps import current_user_id
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.db.session import get_db
 from backend.app.main import app
 from backend.app.models.action import PendingActionORM
@@ -20,6 +21,7 @@ class ManualTaskOperationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
@@ -28,7 +30,7 @@ class ManualTaskOperationTests(unittest.IsolatedAsyncioTestCase):
     def create(self, title: str, start: str):
         with Session(self.engine) as session:
             return task_service.create_task(
-                TaskCreate(title=title, start_at=start, duration_minutes=60), session
+                TaskCreate(title=title, start_at=start, duration_minutes=60), session, user_id=self.user_id
             )
 
     def events(self, task_id: int):
@@ -47,6 +49,7 @@ class ManualTaskOperationTests(unittest.IsolatedAsyncioTestCase):
                 yield session
 
         app.dependency_overrides[get_db] = isolated_db
+        app.dependency_overrides[current_user_id] = lambda: self.user_id
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test"
@@ -93,11 +96,11 @@ class ManualTaskOperationTests(unittest.IsolatedAsyncioTestCase):
         task = self.create("原任务", "2030-01-02T14:00:00+08:00")
         with Session(self.engine) as session:
             proposal = action_service.propose_update(
-                session, task.id, TaskUpdate(title="Agent 修改")
+                session, task.id, TaskUpdate(title="Agent 修改"), user_id=self.user_id
             )
         with Session(self.engine) as session:
             changed = task_service.update_task(
-                session, task.id, TaskUpdate(title="手动修改"), task.version
+                session, task.id, TaskUpdate(title="手动修改"), task.version, user_id=self.user_id
             )
         self.assertEqual((changed.title, changed.version), ("手动修改", 2))
         with Session(self.engine) as session:
@@ -107,9 +110,9 @@ class ManualTaskOperationTests(unittest.IsolatedAsyncioTestCase):
             ["task_created", "proposal_created", "proposal_replaced", "task_updated"],
         )
         with Session(self.engine) as session:
-            delete_proposal = action_service.propose_delete(session, task.id)
+            delete_proposal = action_service.propose_delete(session, task.id, user_id=self.user_id)
         with Session(self.engine) as session:
-            task_service.delete_task(session, task.id, changed.version)
+            task_service.delete_task(session, task.id, changed.version, user_id=self.user_id)
         with Session(self.engine) as session:
             self.assertIsNone(session.get(TaskORM, task.id))
             self.assertEqual(session.get(PendingActionORM, delete_proposal.id).status, "replaced")
@@ -125,13 +128,14 @@ class ManualTaskOperationTests(unittest.IsolatedAsyncioTestCase):
             task_service.update_task(
                 session, task.id,
                 TaskUpdate(start_at="2030-01-02T16:00:00+08:00"), task.version,
+                user_id=self.user_id,
             )
         self.assertEqual(conflict.exception.status_code, 409)
 
         with patch.object(audit_service, "record_event", side_effect=RuntimeError("审计失败")):
             with Session(self.engine) as session, self.assertRaises(RuntimeError):
                 task_service.update_task(
-                    session, task.id, TaskUpdate(title="不能半提交"), task.version
+                    session, task.id, TaskUpdate(title="不能半提交"), task.version, user_id=self.user_id
                 )
         with Session(self.engine) as session:
             current = session.get(TaskORM, task.id)

@@ -19,25 +19,37 @@ def insert_action(
 
 
 
-# 2. 根据 ID 查询操作提案
+# 2. 根据 ID 查询操作提案；不属于该用户时与不存在一样返回 None
 def get_action_by_id(
             session:Session,
             id:int,
+            *,
+            user_id: int,
             for_update: bool = False,
-        ) -> PendingActionORM:
-    return session.get(PendingActionORM, id, with_for_update=for_update)
-
-
-def list_active_pending(session: Session, now: int) -> list[PendingActionORM]:
+        ) -> PendingActionORM | None:
     stmt = select(PendingActionORM).where(
+        PendingActionORM.id == id, PendingActionORM.user_id == user_id
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    return session.scalar(stmt)
+
+
+def list_active_pending(session: Session, now: int, *, user_id: int) -> list[PendingActionORM]:
+    stmt = select(PendingActionORM).where(
+        PendingActionORM.user_id == user_id,
         PendingActionORM.status == "pending",
         PendingActionORM.expires_at > now,
     ).order_by(PendingActionORM.id.desc())
     return list(session.scalars(stmt).all())
 
 
-def list_for_conversation(session: Session, conversation_id: str) -> list[tuple[PendingActionORM, str]]:
-    request_ids = select(ChatTurnORM.request_id).where(ChatTurnORM.conversation_id == conversation_id)
+def list_for_conversation(
+    session: Session, conversation_id: str, *, user_id: int
+) -> list[tuple[PendingActionORM, str]]:
+    request_ids = select(ChatTurnORM.request_id).where(
+        ChatTurnORM.conversation_id == conversation_id, ChatTurnORM.user_id == user_id
+    )
     links = session.execute(select(
         OperationEventORM.action_id, OperationEventORM.request_id,
     ).where(
@@ -51,7 +63,7 @@ def list_for_conversation(session: Session, conversation_id: str) -> list[tuple[
     if not request_by_action:
         return []
     actions = session.scalars(select(PendingActionORM).where(
-        PendingActionORM.id.in_(request_by_action)
+        PendingActionORM.id.in_(request_by_action), PendingActionORM.user_id == user_id
     ).order_by(PendingActionORM.id.desc())).all()
     return [(action, request_by_action[action.id]) for action in actions]
 

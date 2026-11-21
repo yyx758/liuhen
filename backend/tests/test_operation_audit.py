@@ -7,7 +7,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.db.isolated import isolated_engine
+from backend.app.api.deps import current_user_id
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.db.session import get_db
 from backend.app.main import app
 from backend.app.models.action import PendingActionORM
@@ -23,6 +24,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
@@ -31,12 +33,12 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
     def create(self, title="原任务", start="2030-01-02T14:00:00+08:00", request_id=None):
         with Session(self.engine) as session:
             return task_service.create_task(
-                TaskCreate(title=title, start_at=start, duration_minutes=60), session, request_id
+                TaskCreate(title=title, start_at=start, duration_minutes=60), session, request_id, user_id=self.user_id
             )
 
     def propose_update(self, task_id, title):
         with Session(self.engine) as session:
-            return action_service.propose_update(session, task_id, TaskUpdate(title=title))
+            return action_service.propose_update(session, task_id, TaskUpdate(title=title), user_id=self.user_id)
 
     def events(self, action_id):
         with Session(self.engine) as session:
@@ -72,7 +74,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         action = self.propose_update(task.id, "不能半提交")
         with patch.object(audit_service, "record_event", side_effect=RuntimeError("审计写入失败")):
             with Session(self.engine) as session, self.assertRaises(RuntimeError):
-                action_service.confirm_action(session, action.id)
+                action_service.confirm_action(session, action.id, user_id=self.user_id)
         with Session(self.engine) as session:
             current = session.get(TaskORM, task.id)
             self.assertEqual((current.title, current.version), ("原任务", 1))
@@ -93,18 +95,18 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
             self.events(old.id)[-1].details["replaced_by_action_id"], new.id
         )
         with Session(self.engine) as session:
-            action_service.confirm_action(session, new.id)
+            action_service.confirm_action(session, new.id, user_id=self.user_id)
         with Session(self.engine) as session, self.assertRaises(HTTPException):
-            action_service.confirm_action(session, new.id)
+            action_service.confirm_action(session, new.id, user_id=self.user_id)
         self.assertEqual(
             [row.event_type for row in self.events(new.id)],
             ["proposal_created", "proposal_executed"],
         )
 
         with Session(self.engine) as session:
-            deletion = action_service.propose_delete(session, task.id)
+            deletion = action_service.propose_delete(session, task.id, user_id=self.user_id)
         with Session(self.engine) as session:
-            action_service.confirm_action(session, deletion.id)
+            action_service.confirm_action(session, deletion.id, user_id=self.user_id)
         with Session(self.engine) as session:
             self.assertIsNone(session.get(TaskORM, task.id))
         self.assertEqual(
@@ -117,7 +119,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         task = self.create()
         cancelled = self.propose_update(task.id, "取消")
         with Session(self.engine) as session:
-            action_service.cancel_action(session, cancelled.id)
+            action_service.cancel_action(session, cancelled.id, user_id=self.user_id)
         self.assertEqual(self.events(cancelled.id)[-1].event_type, "proposal_cancelled")
 
         expired = self.propose_update(task.id, "过期")
@@ -132,11 +134,11 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
 
         with Session(self.engine) as session:
             conflict = action_service.propose_update(
-                session, task.id, TaskUpdate(start_at="2030-01-02T18:00:00+08:00")
+                session, task.id, TaskUpdate(start_at="2030-01-02T18:00:00+08:00"), user_id=self.user_id
             )
         self.create("占用时间", "2030-01-02T18:00:00+08:00")
         with Session(self.engine) as session, self.assertRaises(HTTPException):
-            action_service.confirm_action(session, conflict.id)
+            action_service.confirm_action(session, conflict.id, user_id=self.user_id)
         conflict_event = self.events(conflict.id)[-1]
         self.assertEqual(conflict_event.event_type, "proposal_conflicted")
         self.assertIn("时间与任务", conflict_event.reason)
@@ -150,7 +152,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(task_repository, "update_if_version", side_effect=update_then_fail):
             with Session(self.engine) as session, self.assertRaises(HTTPException):
-                action_service.confirm_action(session, failed.id)
+                action_service.confirm_action(session, failed.id, user_id=self.user_id)
         failed_event = self.events(failed.id)[-1]
         self.assertEqual(failed_event.event_type, "proposal_failed")
         self.assertEqual(failed_event.reason, "确定性失败")
@@ -165,7 +167,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
             current.title = "别处修改"
             current.version += 1
         with Session(self.engine) as session, self.assertRaises(HTTPException):
-            action_service.confirm_action(session, stale.id)
+            action_service.confirm_action(session, stale.id, user_id=self.user_id)
         self.assertEqual(self.events(stale.id)[-1].event_type, "proposal_conflicted")
         self.assertIn("版本", self.events(stale.id)[-1].reason)
 
@@ -173,33 +175,33 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, expired_on_confirm.id).expires_at = 0
         with Session(self.engine) as session, self.assertRaises(HTTPException):
-            action_service.confirm_action(session, expired_on_confirm.id)
+            action_service.confirm_action(session, expired_on_confirm.id, user_id=self.user_id)
         self.assertEqual(self.events(expired_on_confirm.id)[-1].event_type, "proposal_expired")
 
         expired_on_cancel = self.propose_update(task.id, "取消过期")
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, expired_on_cancel.id).expires_at = 0
         with Session(self.engine) as session, self.assertRaises(HTTPException):
-            action_service.cancel_action(session, expired_on_cancel.id)
+            action_service.cancel_action(session, expired_on_cancel.id, user_id=self.user_id)
         self.assertEqual(self.events(expired_on_cancel.id)[-1].event_type, "proposal_expired")
 
     def test_delete_expired_proposal_preserves_audit_and_rolls_back_on_failure(self) -> None:
         task = self.create()
         action = self.propose_update(task.id, "过期后清理")
         with Session(self.engine) as session, self.assertRaises(HTTPException) as early:
-            action_service.delete_expired_action(session, action.id)
+            action_service.delete_expired_action(session, action.id, user_id=self.user_id)
         self.assertEqual(early.exception.status_code, 409)
 
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, action.id).expires_at = 0
         with patch.object(audit_service, "record_event", side_effect=RuntimeError("审计写入失败")):
             with Session(self.engine) as session, self.assertRaises(RuntimeError):
-                action_service.delete_expired_action(session, action.id)
+                action_service.delete_expired_action(session, action.id, user_id=self.user_id)
         with Session(self.engine) as session:
             self.assertIsNotNone(session.get(PendingActionORM, action.id))
 
         with Session(self.engine) as session:
-            action_service.delete_expired_action(session, action.id)
+            action_service.delete_expired_action(session, action.id, user_id=self.user_id)
         with Session(self.engine) as session:
             self.assertIsNone(session.get(PendingActionORM, action.id))
             self.assertIsNotNone(session.get(TaskORM, task.id))
@@ -208,7 +210,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
             ["proposal_created", "proposal_expired", "proposal_deleted"],
         )
         with Session(self.engine) as session, self.assertRaises(HTTPException) as repeated:
-            action_service.delete_expired_action(session, action.id)
+            action_service.delete_expired_action(session, action.id, user_id=self.user_id)
         self.assertEqual(repeated.exception.status_code, 404)
 
     async def test_delete_expired_proposal_http_endpoint(self) -> None:
@@ -220,6 +222,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
                 yield session
 
         app.dependency_overrides[get_db] = isolated_db
+        app.dependency_overrides[current_user_id] = lambda: self.user_id
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test"
@@ -245,7 +248,7 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, marked_expired.id).expires_at = 0
         with Session(self.engine) as session, self.assertRaises(HTTPException):
-            action_service.confirm_action(session, marked_expired.id)
+            action_service.confirm_action(session, marked_expired.id, user_id=self.user_id)
         with Session(self.engine) as session, session.begin():
             session.get(PendingActionORM, pending_expired.id).expires_at = 0
         with Session(self.engine) as session:
@@ -261,13 +264,14 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
         task = self.create()
         action = self.propose_update(task.id, "待确认")
         with Session(self.engine) as session:
-            action_service.confirm_action(session, action.id)
+            action_service.confirm_action(session, action.id, user_id=self.user_id)
 
         def isolated_db():
             with self.session_factory() as session:
                 yield session
 
         app.dependency_overrides[get_db] = isolated_db
+        app.dependency_overrides[current_user_id] = lambda: self.user_id
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test"
