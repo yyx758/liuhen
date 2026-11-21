@@ -18,7 +18,7 @@ from backend.app.services import audit_service
 
 # 将数据库实体转换为响应 DTO
 def to_db_utc(value: datetime) -> datetime:
-    # SQLite 的 DATETIME 不保留时区；统一使用 UTC 无时区值作为数据库表示
+    # 统一使用 UTC 无时区值作为数据库表示
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
@@ -70,18 +70,12 @@ def _create_task(
     owns_transaction = not session.info.get("chat_tool_transaction", False)
     with session.begin() if owns_transaction else nullcontext():
 
-        # SQLite 先取得写锁，避免两个创建请求同时查询到“没有冲突”。
-        # 查询、插入和提交在同一个事务里完成。
-        if owns_transaction and session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
         payload_hash = None
         if request_id is not None:
-            if session.get_bind().dialect.name == "postgresql":
-                session.execute(
-                    text("SELECT pg_advisory_xact_lock(1, hashtext(:key))"),
-                    {"key": request_id},
-                )
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(1, hashtext(:key))"),
+                {"key": request_id},
+            )
             payload = data.model_dump(mode="json")
             payload_hash = hashlib.sha256(
                 json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -187,11 +181,8 @@ def update_task(
 
     try:
         with session.begin():
-            dialect = session.get_bind().dialect.name
-            if dialect == "sqlite":
-                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             task = task_repository.get_task_by_id(
-                session, task_id, for_update=dialect == "postgresql"
+                session, task_id, for_update=True
             )
             if task is None:
                 raise HTTPException(404, "待办不存在")
@@ -224,11 +215,8 @@ def update_task(
 
 def delete_task(session: Session, task_id: int, expected_version: int) -> None:
     with session.begin():
-        dialect = session.get_bind().dialect.name
-        if dialect == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         task = task_repository.get_task_by_id(
-            session, task_id, for_update=dialect == "postgresql"
+            session, task_id, for_update=True
         )
         if task is None:
             raise HTTPException(404, "待办不存在")

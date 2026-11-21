@@ -1,20 +1,18 @@
 import json
-import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import URL, create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.agent.tool_registry import ToolRegistry
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.models.conversation import ConversationORM
 from backend.app.models.operation_event import OperationEventORM
 from backend.app.models.request import ChatTurnORM
@@ -25,16 +23,13 @@ from backend.app.services import chat_service, chat_turn_service, conversation_s
 
 class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.engine = create_engine(URL.create(
-            "sqlite+pysqlite", database=str(Path(self.directory.name) / "requests.db")
-        ))
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     def test_direct_create_request_is_idempotent(self) -> None:
         request_id = str(uuid4())

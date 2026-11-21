@@ -5,8 +5,6 @@
 .env.*
 **/__pycache__
 **/*.py[cod]
-**/*.db
-**/*.db-*
 frontend/app/node_modules
 frontend/app/dist
 frontend/reference

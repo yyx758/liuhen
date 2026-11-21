@@ -29,7 +29,7 @@ class TaskORM(Base):
         nullable=True
     )
 
-    # 两种数据库均按 UTC 无时区值存储，读写时在 Service 边界转换
+    # 按 UTC 无时区值存储，读写时在 Service 边界转换
     start_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
 
@@ -51,5 +51,5 @@ class TaskORM(Base):
             (text("tsrange(start_at, end_at, '[)')"), "&&"),
             where=text("status = 'todo' AND start_at IS NOT NULL AND end_at IS NOT NULL"),
             name="ex_tasks_no_overlap",
-        ).ddl_if(dialect="postgresql"),
+        ),
     )

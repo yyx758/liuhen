@@ -1,35 +1,28 @@
 import json
-import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from pathlib import Path
 from threading import Barrier
 
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
 from backend.app.agent.tool_registry import ToolRegistry
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.models.task import TaskORM
 from backend.app.services.task_service import list_tasks
 
 
 class TaskScheduleTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.engine = create_engine(
-            "sqlite+pysqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
         self.registry = ToolRegistry()
 
     def tearDown(self) -> None:
         self.engine.dispose()
+        self.database.__exit__(None, None, None)
 
     def create(self, title: str, start_at: str, duration_minutes: int) -> dict:
         arguments = json.dumps({
@@ -134,12 +127,7 @@ class TaskScheduleTests(unittest.TestCase):
                 ))
 
     def test_concurrent_creation_keeps_one_task(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            engine = create_engine(
-                URL.create("sqlite+pysqlite", database=str(Path(directory) / "tasks.db")),
-                connect_args={"timeout": 10},
-            )
-            Base.metadata.create_all(engine)
+        with isolated_engine() as engine:
             barrier = Barrier(2)
 
             def create_once(title: str) -> str:

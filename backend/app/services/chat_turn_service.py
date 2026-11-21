@@ -20,11 +20,6 @@ def now_timestamp() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
-def begin_immediate(session) -> None:
-    if session.get_bind().dialect.name == "sqlite":
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
-
 @dataclass
 class TurnState:
     request_id: str
@@ -38,17 +33,15 @@ def acquire_turn(request_id: str, user_text: str, conversation_id: str | None, s
     owner_token = str(uuid4())
     now = now_timestamp()
     with session_factory() as session, session.begin():
-        begin_immediate(session)
-        if session.get_bind().dialect.name == "postgresql":
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(2, hashtext(:key))"),
+            {"key": request_id},
+        )
+        if conversation_id is not None:
             session.execute(
-                text("SELECT pg_advisory_xact_lock(2, hashtext(:key))"),
-                {"key": request_id},
+                text("SELECT pg_advisory_xact_lock(3, hashtext(:key))"),
+                {"key": conversation_id},
             )
-            if conversation_id is not None:
-                session.execute(
-                    text("SELECT pg_advisory_xact_lock(3, hashtext(:key))"),
-                    {"key": conversation_id},
-                )
         if session.get(DeletedChatRequestORM, request_id) is not None:
             raise HTTPException(410, "该请求所属的会话已删除，请开始新对话")
         turn = session.get(ChatTurnORM, request_id)
@@ -108,7 +101,6 @@ def require_owner(session, request_id: str, owner_token: str) -> ChatTurnORM:
 def append_message(request_id: str, owner_token: str, message: dict, session_factory) -> None:
     normalized = conversation_service.normalize_message(message)
     with session_factory() as session, session.begin():
-        begin_immediate(session)
         turn = require_owner(session, request_id, owner_token)
         turn.messages = [*turn.messages, normalized]
         turn.lease_until = now_timestamp() + LEASE_SECONDS
@@ -124,7 +116,6 @@ def execute_tool(
     session_factory,
 ) -> str:
     with session_factory() as session, session.begin():
-        begin_immediate(session)
         turn = require_owner(session, request_id, owner_token)
         for message in turn.messages:
             if message.get("role") == "tool" and message.get("tool_call_id") == call_id:
@@ -159,7 +150,6 @@ def execute_tool(
 
 def complete_turn(request_id: str, owner_token: str, answer: str, session_factory) -> None:
     with session_factory() as session, session.begin():
-        begin_immediate(session)
         turn = require_owner(session, request_id, owner_token)
         if not turn.messages or turn.messages[-1].get("role") != "assistant":
             raise HTTPException(500, "本轮对话缺少最终回复")
@@ -179,7 +169,6 @@ def complete_turn(request_id: str, owner_token: str, answer: str, session_factor
 def release_turn(request_id: str, owner_token: str, session_factory) -> None:
     """Allow an immediate retry after a handled error; committed steps stay intact."""
     with session_factory() as session, session.begin():
-        begin_immediate(session)
         turn = session.get(ChatTurnORM, request_id)
         if turn is not None and turn.status == "processing" and turn.owner_token == owner_token:
             turn.lease_until = now_timestamp()

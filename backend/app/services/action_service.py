@@ -219,12 +219,9 @@ def propose_update(
 
     with nullcontext() if session.info.get("chat_tool_transaction") else session.begin():
 
-        if not session.info.get("chat_tool_transaction") and session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
         task = task_repository.get_task_by_id(
             session, task_id,
-            for_update=session.get_bind().dialect.name == "postgresql",
+            for_update=True,
         )
 
         if task is None:
@@ -271,12 +268,9 @@ def propose_delete(
 
     with nullcontext() if session.info.get("chat_tool_transaction") else session.begin():
 
-        if not session.info.get("chat_tool_transaction") and session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
         task = task_repository.get_task_by_id(
             session, task_id,
-            for_update=session.get_bind().dialect.name == "postgresql",
+            for_update=True,
         )
 
         if task is None:
@@ -304,20 +298,15 @@ def propose_delete(
 def expire_due_actions(session: Session) -> int:
     """Mark unattended proposals expired; retain their snapshots as history."""
     with session.begin():
-        if session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         return expire_pending_with_audit(session, now_timestamp())
 
 
 def purge_expired_actions(session: Session) -> int:
     """Delete elapsed proposals; preserve expiry and deletion audit rows."""
     with session.begin():
-        dialect = session.get_bind().dialect.name
-        if dialect == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         now = now_timestamp()
         due = action_repository.list_expired_actions(
-            session, now, for_update=dialect == "postgresql"
+            session, now, for_update=True
         )
         for action in due:
             if not action_repository.delete_expired_action(session, action.id, now):
@@ -367,12 +356,9 @@ def list_for_conversation(session: Session, conversation_id: str) -> list[Action
 def delete_expired_action(session: Session, action_id: int) -> None:
     """Remove an elapsed proposal while retaining its append-only audit trail."""
     with session.begin():
-        if session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
         action = action_repository.get_action_by_id(
             session, action_id,
-            for_update=session.get_bind().dialect.name == "postgresql",
+            for_update=True,
         )
         if action is None:
             raise HTTPException(404, "操作提案不存在")
@@ -407,10 +393,6 @@ def confirm_action(
     error_status = 409
 
     with session.begin():
-        # 与创建任务共用 SQLite 写锁，确保“检查冲突 → 更新”不可交错。
-        if session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
         action = action_repository.get_action_by_id(
             session, action_id
         )
@@ -474,7 +456,7 @@ def confirm_action(
                         if action.batch_id is not None:
                             current_task = task_repository.get_task_by_id(
                                 session, action.task_id,
-                                for_update=session.get_bind().dialect.name == "postgresql",
+                                for_update=True,
                             )
                             if current_task is not None:
                                 current = to_task_read(current_task)
@@ -618,10 +600,6 @@ def cancel_action(
     error = None
 
     with session.begin():
-        # 在读取状态前取得写锁，避免确认和取消同时读到 pending。
-        if session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-
         action = action_repository.get_action_by_id(
             session, action_id
         )

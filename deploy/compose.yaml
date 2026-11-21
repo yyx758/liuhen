@@ -1,6 +1,19 @@
 name: liuhen
 
 services:
+  db:
+    image: postgres:17.12-alpine
+    env_file:
+      - ./secrets/postgres.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   api:
     image: liuhen-api:local
     build:
@@ -8,11 +21,13 @@ services:
       dockerfile: deploy/Dockerfile.api
     env_file:
       - ./secrets/model.env
+      - ./secrets/postgres.env
     environment:
-      LIUHEN_DATABASE_URL: sqlite+pysqlite:////data/liuhen.db
+      LIUHEN_DATABASE_HOST: db
       LIUHEN_SQL_ECHO: "false"
-    volumes:
-      - liuhen_data:/data
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=5)"]
@@ -39,6 +54,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  liuhen_data:
+  postgres_data:
   caddy_data:
   caddy_config:

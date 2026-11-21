@@ -21,11 +21,11 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install fastapi uvicorn sqlalchemy pydantic httpx python-dotenv
+python -m pip install -r backend/requirements.txt
 Copy-Item .env.example .env
 ```
 
-在 `.env` 中填写模型接口的 `base_url`、`api_key` 和 `model`。不配置 `database_url` 时使用本地 SQLite；PostgreSQL 配置方式见[后端说明](backend/README.md)。`.env` 已被 Git 忽略，不要提交真实密钥。
+在 `.env` 中填写模型接口的 `base_url`、`api_key`、`model` 和 PostgreSQL `database_url`。本地需先启动 PostgreSQL；配置方式见[后端说明](backend/README.md)。`.env` 已被 Git 忽略，不要提交真实密钥。
 
 启动后端：
 

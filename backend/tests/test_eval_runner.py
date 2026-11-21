@@ -1,19 +1,16 @@
 import asyncio
 import json
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.config.clock import fixed_now, now_utc
 from backend.app.config.settings import USER_TIMEZONE
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.evals.scenarios import ScenarioContext
 from backend.app.evals.run import run_case_01
 from backend.app.schemas.task import TaskUpdate
@@ -23,12 +20,8 @@ from backend.app.services import action_service, chat_service
 class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_evaluation_clock_covers_proposals_and_action_api(self) -> None:
         frozen = datetime(2030, 1, 1, 10, tzinfo=USER_TIMEZONE)
-        with tempfile.TemporaryDirectory() as directory:
-            engine = create_engine(URL.create(
-                "sqlite+pysqlite", database=str(Path(directory) / "clock.db"),
-            ))
+        with isolated_engine() as engine:
             try:
-                Base.metadata.create_all(engine)
                 factory = sessionmaker(bind=engine)
                 context = ScenarioContext(factory, frozen)
                 task_id = context.add_task("项目报告", start_at=context.local_time(1, 9))

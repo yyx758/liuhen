@@ -71,8 +71,6 @@ def propose_update(data: UpdateProposalArguments, session: Session):
 
     owns_transaction = not session.info.get("chat_tool_transaction")
     with session.begin() if owns_transaction else nullcontext():
-        if owns_transaction and session.get_bind().dialect.name == "sqlite":
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         previous_batch = session.info.get("proposal_batch_id")
         session.info["proposal_batch_id"] = (
             previous_batch or session.info.get("audit_request_id") or str(uuid4())

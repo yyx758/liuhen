@@ -1,17 +1,15 @@
 import json
-import tempfile
 import unittest
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy import URL, create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.agent.tool_registry import ToolRegistry
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.models.action import PendingActionORM
 from backend.app.models.task import TaskORM
 from backend.app.services import chat_service, conversation_service
@@ -19,14 +17,8 @@ from backend.app.services import chat_service, conversation_service
 
 class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.engine = create_engine(
-            URL.create(
-                "sqlite+pysqlite",
-                database=str(Path(self.directory.name) / "agent_test.db"),
-            )
-        )
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
         self.session_factory = sessionmaker(bind=self.engine)
         self.session_patch = patch.object(
             agent_runner, "SessionLocal", self.session_factory
@@ -36,7 +28,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.session_patch.stop()
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     async def run_with_tool_call(self, title: str, final_reply: str) -> tuple[str, list[dict]]:
         arguments = json.dumps(

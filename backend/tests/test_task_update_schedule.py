@@ -1,12 +1,9 @@
-import tempfile
 import unittest
-from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session
 
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.models.task import TaskORM
 from backend.app.schemas.task import TaskCreate, TaskUpdate
 from backend.app.services import action_service, task_service
@@ -14,18 +11,12 @@ from backend.app.services import action_service, task_service
 
 class TaskUpdateScheduleTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.engine = create_engine(
-            URL.create(
-                "sqlite+pysqlite",
-                database=str(Path(self.directory.name) / "update_test.db"),
-            )
-        )
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
 
     def tearDown(self) -> None:
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     def create(self, title: str, start: str):
         with Session(self.engine) as session:

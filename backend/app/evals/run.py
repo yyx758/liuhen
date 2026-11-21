@@ -1,18 +1,16 @@
-"""Run Agent scenarios with the configured real model and isolated SQLite files."""
+"""Run Agent scenarios with the configured real model and isolated PostgreSQL databases."""
 
 import argparse
 import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
-
-from sqlalchemy import URL, create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.config.env import get_judge_config, get_model_config
 from backend.app.config.settings import USER_TIMEZONE
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.evals.grading import score_business
 from backend.app.evals.judge import judge_reply
 from backend.app.evals.scenarios import (
@@ -93,13 +91,8 @@ async def run_case(
         raise ValueError("并发优先方向只能是 confirm 或 cancel")
     run_now = local_now(evaluation_now)
 
-    with TemporaryDirectory() as directory:
-        database_path = Path(directory) / "scenario.db"
-        engine = create_engine(URL.create(
-            "sqlite+pysqlite", database=str(database_path),
-        ))
+    with isolated_engine() as engine:
         try:
-            Base.metadata.create_all(engine)
             session_factory = sessionmaker(bind=engine)
             context = ScenarioContext(session_factory, run_now, race_preference)
             initial_tasks = []

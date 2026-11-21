@@ -1,16 +1,14 @@
 import json
-import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 
 from fastapi import HTTPException
-from sqlalchemy import URL, create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.models.action import PendingActionORM
 from backend.app.models.task import TaskORM
@@ -21,15 +19,12 @@ from backend.app.services import action_service, task_service
 
 class ActionLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.engine = create_engine(URL.create(
-            "sqlite+pysqlite", database=str(Path(self.directory.name) / "actions.db")
-        ))
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
 
     def tearDown(self) -> None:
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     def create_task(self):
         with Session(self.engine) as session:
