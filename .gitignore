@@ -10,3 +10,4 @@ __pycache__/
 frontend/app/node_modules/
 backend/evals/results/
 backend/evals/reviews/
+deploy/secrets/

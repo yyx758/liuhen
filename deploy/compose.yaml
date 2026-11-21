@@ -1,0 +1,44 @@
+name: liuhen
+
+services:
+  api:
+    image: liuhen-api:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    env_file:
+      - ./secrets/model.env
+    environment:
+      LIUHEN_DATABASE_URL: sqlite+pysqlite:////data/liuhen.db
+      LIUHEN_SQL_ECHO: "false"
+    volumes:
+      - liuhen_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=5)"]
+      interval: 30s
+      timeout: 7s
+      retries: 3
+
+  web:
+    image: liuhen-web:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - ./secrets/auth.env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  liuhen_data:
+  caddy_data:
+  caddy_config:

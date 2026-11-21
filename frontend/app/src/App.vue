@@ -15,6 +15,8 @@ let clock: ReturnType<typeof setInterval> | undefined
 const pendingCount = computed(() => state.actions.filter(action => action.status === 'pending' && new Date(action.expires_at).getTime() > state.clockNow).length)
 const detail = computed(() => state.tasks.find(task => task.id === state.detailTaskId))
 const detailIsAi = computed(() => Boolean(detail.value?.created_by_agent))
+const icpRecord = import.meta.env.VITE_ICP_RECORD?.trim() || '赣ICP备2026013160号-1'
+const policeRecord = import.meta.env.VITE_POLICE_RECORD?.trim()
 
 onMounted(() => { void refresh(); clock = setInterval(() => { state.clockNow = Date.now() }, 1000) })
 onUnmounted(() => { if (clock) clearInterval(clock) })
@@ -34,7 +36,7 @@ async function deleteTask(id: number, version: number) {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell site-shell">
     <header class="topbar">
       <RouterLink to="/" class="brand" aria-label="小记首页"><span class="brand-mark"><Icon name="spark" :size="13" /></span>小记<span class="brand-period">.</span></RouterLink>
       <nav class="nav" aria-label="主导航">
@@ -44,7 +46,13 @@ async function deleteTask(id: number, version: number) {
     </header>
     <div v-if="state.error" class="notice error" role="alert">{{ state.error }}<button type="button" aria-label="关闭提示" @click="closeNotice">×</button></div>
     <RouterView />
-    <footer class="footer"><span>小记 · 把日子安排得刚刚好</span><span>任务与提案同步自本地 FastAPI 服务</span></footer>
+    <footer class="footer site-footer">
+      <div class="footer-info"><span>小记 · 把日子安排得刚刚好</span><span>任务与提案同步保存</span></div>
+      <div v-if="icpRecord || policeRecord" class="footer-filing">
+        <a v-if="icpRecord" href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">{{ icpRecord }}</a>
+        <a v-if="policeRecord" href="https://beian.mps.gov.cn/" target="_blank" rel="noopener noreferrer">{{ policeRecord }}</a>
+      </div>
+    </footer>
   </div>
   <TaskDialog />
   <div v-if="detail" class="drawer-overlay" @click.self="state.detailTaskId = null">

@@ -1,0 +1,39 @@
+liuhen.yyyyx.top {
+    encode zstd gzip
+
+    @private path /app /app/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/*
+    basic_auth @private {
+        {$LIUHEN_AUTH_USER} {$LIUHEN_AUTH_HASH}
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+    }
+
+    @api path /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/*
+    handle @api {
+        reverse_proxy api:8000
+    }
+
+    @app path /app /app/*
+    handle @app {
+        uri strip_prefix /app
+        root * /srv/frontend
+        try_files {path} /index.html
+        file_server
+    }
+
+    handle / {
+        root * /srv/public
+        file_server
+    }
+
+    handle {
+        respond 404
+    }
+}
+
+yyyyx.top, www.yyyyx.top {
+    redir https://liuhen.yyyyx.top/ permanent
+}

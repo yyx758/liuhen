@@ -27,7 +27,7 @@ DATABASE_URL = (
 # Engine：数据库连接基础设施
 engine = create_engine(
     DATABASE_URL,
-    echo=True,
+    echo=getenv("LIUHEN_SQL_ECHO", "true").lower() in {"1", "true", "yes"},
     **({"connect_args": {"check_same_thread": False}} if make_url(DATABASE_URL).get_backend_name() == "sqlite" else {})
 )
 

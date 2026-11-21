@@ -53,3 +53,7 @@ npm run dev
 | `frontend/reference/` | 前端视觉原型 |
 
 更详细的实现、接口与测试说明见[后端 README](backend/README.md)和[前端 README](frontend/app/README.md)。
+
+## 部署
+
+单人使用的 Docker Compose 部署方案见[部署说明](deploy/README.md)。公网入口由 Caddy 提供 HTTPS 和登录保护；后端不直接暴露到公网。

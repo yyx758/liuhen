@@ -7,7 +7,7 @@ import LibraryPage from './views/LibraryPage.vue'
 import AuditPage from './views/AuditPage.vue'
 
 export const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/', component: HomePage },
     { path: '/chat', component: ChatPage },
