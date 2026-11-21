@@ -22,6 +22,7 @@ export default defineConfig({
       '/chat': backend,
       '/actions': backend,
       '/audit': backend,
+      '/admin': backend,
     },
   },
 })

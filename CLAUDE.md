@@ -8,7 +8,7 @@
 
 - 优先级：可靠性、可解释性、操作留痕、可验证性，而不是堆功能。
 - 当前已实现：任务管理、AI 对话与提案确认、操作留痕、Vue 3 前端（对话、待办、日历、留痕页）、后端测试与 Agent 测评。
-- 多用户改造按 `docs/prd-multi-user.md` 分阶段进行。已完成：业务数据按 `user_id` 隔离；账号密码登录（Argon2id 哈希、服务端会话 + HttpOnly Cookie、强制改密、Origin 校验、登录限流）；账号管理命令行 `python -m backend.app.cli`。尚未实现：注册与审核、管理员页面与接口、账号事件、个人设置、每日对话上限（P4、P5）。
+- 多用户改造按 `docs/prd-multi-user.md` 分阶段进行。已完成：业务数据按 `user_id` 隔离；账号密码登录（Argon2id 哈希、服务端会话 + HttpOnly Cookie、强制改密、Origin 校验、登录限流）；注册与管理员审核、账号停用/启用/删除、管理后台（`/admin/*`，依赖 `AdminUser`）、个人设置（邮箱、在线设备、登录记录）、只追加的账号事件 `account_events`；账号管理命令行 `python -m backend.app.cli`。尚未实现：每日对话上限与用量统计（P5）。
 - 尚未实现（不要因路线图提前实现）：提醒主动推送、文档管理后端与 Agent 工具、偏好管理、SSE 流式接口、会话列表/历史的 HTTP 接口。前端资料库只是原型示例。
 
 ## 技术栈与结构
@@ -19,7 +19,7 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| `backend/app/api/` | FastAPI 路由（chat、tasks、actions、audit） |
+| `backend/app/api/` | FastAPI 路由（auth、admin、chat、tasks、actions、audit） |
 | `backend/app/agent/` | 模型调用、Agent 循环、工具注册（`tool_registry.py`） |
 | `backend/app/services/` | 任务、提案、对话、幂等请求与审计的业务逻辑 |
 | `backend/app/repositories/` | 任务和提案的数据访问 |

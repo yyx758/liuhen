@@ -41,11 +41,18 @@ const modalError = ref('')
 const counts = computed(() => page.value?.counts ?? { pending: 0, active: 0, disabled: 0, rejected: 0, all: 0 })
 const selfId = computed(() => auth.user?.id)
 
+// 切换筛选或搜索很快时，只采用最后一次请求的结果，避免先发后到的响应覆盖新结果。
+let usersSeq = 0
+let eventsSeq = 0
+
 async function loadUsers() {
   loadError.value = ''
+  const seq = ++usersSeq
   try {
-    page.value = await api.adminUsers(tab.value, q.value)
-    auth.pendingUsers = page.value.counts.pending
+    const result = await api.adminUsers(tab.value, q.value)
+    if (seq !== usersSeq) return
+    page.value = result
+    auth.pendingUsers = result.counts.pending
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : '加载失败'
   }
@@ -53,9 +60,11 @@ async function loadUsers() {
 
 async function loadEvents(more = false) {
   loadError.value = ''
+  const seq = ++eventsSeq
   try {
     const beforeId = more ? events.value.at(-1)?.id : undefined
     const items = await api.accountEvents({ group: eventGroup.value, beforeId, limit: 50 })
+    if (seq !== eventsSeq) return
     events.value = more ? [...events.value, ...items] : items
     eventsDone.value = items.length < 50
   } catch (error) {
@@ -273,6 +282,8 @@ async function copyPassword() {
       <div v-if="events.length && !eventsDone" class="adm-more"><button class="outline" type="button" @click="loadEvents(true)">加载更多</button></div>
     </template>
 
+    <!-- 移到 body 下：.page 的入场动画带 transform，会让 fixed 定位只覆盖 main。 -->
+    <Teleport to="body">
     <div v-if="drawerUser" class="drawer-overlay" @click.self="drawerUser = null">
       <section class="drawer adm-drawer" role="dialog" aria-modal="true" aria-labelledby="adm-drawer-title">
         <div class="drawer-head"><span class="tiny">账号详情 / #{{ drawerUser.id }}</span><button class="square-btn" type="button" aria-label="关闭" @click="drawerUser = null"><Icon name="x" :size="17" /></button></div>
@@ -364,5 +375,6 @@ async function copyPassword() {
         </template>
       </section>
     </div>
+    </Teleport>
   </main>
 </template>

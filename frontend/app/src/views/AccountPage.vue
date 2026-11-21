@@ -109,6 +109,8 @@ async function confirmDialog() {
       </div>
     </section>
 
+    <!-- 移到 body 下：.page 的入场动画带 transform，会让 fixed 定位只覆盖 main。 -->
+    <Teleport to="body">
     <div v-if="dialog" class="overlay" @click.self="close">
       <section class="modal" role="dialog" aria-modal="true" aria-labelledby="acc-dialog-title">
         <template v-if="dialog.type === 'email'">
@@ -137,5 +139,6 @@ async function confirmDialog() {
         </div>
       </section>
     </div>
+    </Teleport>
   </main>
 </template>

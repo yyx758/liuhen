@@ -45,9 +45,9 @@ def main() -> None:
         assert status == 200 and b"/app/assets/" in app
         assert fetch("/app/chat", authorization)[0] == 200
         # 通过网关后，业务接口还需要应用内登录（会话 Cookie）。
-        for path in ("/tasks", "/audit/summary", "/auth/me"):
+        for path in ("/tasks", "/audit/summary", "/auth/me", "/admin/users"):
             status, body = fetch(path, authorization)
-            assert status == 401 and json.loads(body)["detail"]["code"] == "unauthenticated", path
+            assert status == 401 and json.loads(body)["detail"] == "请先登录", path
         print("HTTPS、ICP备案页、网关保护、应用页面与应用内登录保护：全部通过")
     else:
         print("HTTPS、ICP备案页和未登录保护：全部通过；未提供凭据，跳过登录后检查")
