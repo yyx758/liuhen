@@ -1,9 +1,8 @@
 """Read-only checks for the public gateway after deployment."""
 
 import base64
-import http.client
 import json
-import ssl
+import os
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -22,23 +21,14 @@ def fetch(path: str, authorization: str | None = None) -> tuple[int, bytes]:
         return error.code, error.read()
 
 
-def check_redirect(host: str) -> None:
-    connection = http.client.HTTPSConnection(host, 443, timeout=10, context=ssl.create_default_context())
-    try:
-        connection.request("GET", "/", headers={"Host": host})
-        response = connection.getresponse()
-        assert response.status == 301, (host, response.status)
-        assert response.getheader("Location") == BASE + "/", host
-        response.read()
-    finally:
-        connection.close()
-
-
 def main() -> None:
     login_file = Path(__file__).resolve().parent / "secrets/login-once.txt"
-    entries = dict(line.strip().split("：", 1) for line in login_file.read_text(encoding="utf-8").splitlines())
-    token = base64.b64encode(f"{entries['用户名']}:{entries['密码']}".encode()).decode()
-    authorization = f"Basic {token}"
+    credentials = None
+    if login_file.exists():
+        entries = dict(line.strip().split("：", 1) for line in login_file.read_text(encoding="utf-8").splitlines())
+        credentials = (entries["用户名"], entries["密码"])
+    elif os.getenv("LIUHEN_VERIFY_AUTH_USER") and os.getenv("LIUHEN_VERIFY_AUTH_PASSWORD"):
+        credentials = (os.environ["LIUHEN_VERIFY_AUTH_USER"], os.environ["LIUHEN_VERIFY_AUTH_PASSWORD"])
 
     status, landing = fetch("/")
     assert status == 200 and "赣ICP备2026013160号-1".encode() in landing
@@ -46,18 +36,21 @@ def main() -> None:
 
     assert fetch("/app/")[0] == 401
     assert fetch("/tasks")[0] == 401
-    status, app = fetch("/app/", authorization)
-    assert status == 200 and b"/app/assets/" in app
-    assert fetch("/app/chat", authorization)[0] == 200
-    status, tasks = fetch("/tasks", authorization)
-    assert status == 200 and isinstance(json.loads(tasks), list)
-    status, summary = fetch("/audit/summary", authorization)
-    assert status == 200 and isinstance(json.loads(summary), dict)
     assert fetch("/docs")[0] == 404
 
-    check_redirect("yyyyx.top")
-    check_redirect("www.yyyyx.top")
-    print("HTTPS、ICP备案页、登录保护、应用、API 和旧域名跳转：全部通过")
+    if credentials:
+        token = base64.b64encode(f"{credentials[0]}:{credentials[1]}".encode()).decode()
+        authorization = f"Basic {token}"
+        status, app = fetch("/app/", authorization)
+        assert status == 200 and b"/app/assets/" in app
+        assert fetch("/app/chat", authorization)[0] == 200
+        status, tasks = fetch("/tasks", authorization)
+        assert status == 200 and isinstance(json.loads(tasks), list)
+        status, summary = fetch("/audit/summary", authorization)
+        assert status == 200 and isinstance(json.loads(summary), dict)
+        print("HTTPS、ICP备案页、登录保护、应用和 API：全部通过")
+    else:
+        print("HTTPS、ICP备案页和未登录保护：全部通过；未提供凭据，跳过登录后检查")
 
 
 if __name__ == "__main__":

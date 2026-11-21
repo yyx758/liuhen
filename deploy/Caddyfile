@@ -33,7 +33,3 @@ liuhen.yyyyx.top {
         respond 404
     }
 }
-
-yyyyx.top, www.yyyyx.top {
-    redir https://liuhen.yyyyx.top/ permanent
-}

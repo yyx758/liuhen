@@ -14,9 +14,10 @@
 ## 访问与维护
 
 - 公开入口：`https://liuhen.yyyyx.top/`，显示项目简介和 ICP 备案号。点击进入 `/app/` 后浏览器会要求登录；未登录访问应用和 API 返回 401。
-- `yyyyx.top` 和 `www.yyyyx.top` 的 HTTPS 入口跳转到新站点。首次申请这两个域名的证书时，先将对应 DNS 记录改为「仅 DNS」；证书成功签发后可恢复 Cloudflare 代理，并使用 Full (strict) 模式。
+- 该配置只服务 `liuhen.yyyyx.top`，不处理根域名和 `www`。
 - 更新：上传新代码后，在服务器运行 `docker compose -f deploy/compose.yaml up -d --build`。
 - 查看状态：`docker compose -f deploy/compose.yaml ps`；查看日志：`docker compose -f deploy/compose.yaml logs --tail=100`。
+- 站点检查：`python3 deploy/verify_site.py`。若要同时检查登录后的应用和 API，可临时提供 `LIUHEN_VERIFY_AUTH_USER` 和 `LIUHEN_VERIFY_AUTH_PASSWORD` 环境变量；不设置时只检查公开页面和未登录保护。
 - 备份：定期备份 `liuhen_data` 卷中的 SQLite 数据库。不要把数据库文件或模型密钥提交到 Git。
 
 当前登录保护由网关统一执行，应用本身还没有账号和数据归属机制，适用于单人使用。要支持多人使用，需要在后端增加用户身份与任务、对话、提案的归属校验。
