@@ -70,18 +70,40 @@ export type EventQuery = {
   category?: 'all' | 'failed' | 'cancelled'
 }
 
+export type CurrentUser = {
+  id: number
+  username: string
+  email: string | null
+  role: 'user' | 'admin'
+  must_change_password: boolean
+}
+
 const BASE = import.meta.env.VITE_API_BASE_URL || ''
 
 export class ApiError extends Error {
   readonly status: number
-  constructor(message: string, status: number) { super(message); this.status = status }
+  /** 后端认证类错误的机器可读代码，如 invalid_credentials、password_change_required。 */
+  readonly code: string | null
+  constructor(message: string, status: number, code: string | null = null) {
+    super(message)
+    this.status = status
+    this.code = code
+  }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// 会话失效或需要改密时的统一处理（跳转页面）；由 main.ts 注册，避免这里直接依赖路由。
+let authErrorHandler: ((error: ApiError) => void) | null = null
+export function onAuthError(handler: (error: ApiError) => void) { authErrorHandler = handler }
+
+type RequestOptions = RequestInit & { /** 登录、获取当前用户等接口自己处理 401，不触发统一跳转。 */ handleAuthError?: boolean }
+
+async function request<T>(path: string, { handleAuthError = true, ...init }: RequestOptions = {}): Promise<T> {
   let response: Response
   try {
     response = await fetch(`${BASE}${path}`, {
       ...init,
+      // 会话令牌在 HttpOnly Cookie 中，由浏览器自动携带；前端代码读不到也不保存令牌。
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', ...init.headers },
     })
   } catch {
@@ -91,16 +113,28 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (response.status === 502 || response.status === 503) throw new Error('无法连接后端，请确认 FastAPI 已启动。')
     const body = await response.json().catch(() => null)
     const detail = body?.detail
-    const message = typeof detail === 'string'
-      ? detail
-      : Array.isArray(detail) ? detail.map((item: { msg?: string }) => item.msg).join('；') : null
-    throw new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status)
+    let message: string | null = null
+    let code: string | null = null
+    if (typeof detail === 'string') message = detail
+    else if (Array.isArray(detail)) message = detail.map((item: { msg?: string }) => item.msg).join('；')
+    else if (detail && typeof detail === 'object') { message = detail.message ?? null; code = detail.code ?? null }
+    const error = new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status, code)
+    if (handleAuthError && (response.status === 401 || code === 'password_change_required')) authErrorHandler?.(error)
+    throw error
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
 export const api = {
+  me: () => request<CurrentUser>('/auth/me', { handleAuthError: false }),
+  login: (account: string, password: string, remember: boolean) => request<CurrentUser>('/auth/login', {
+    method: 'POST', body: JSON.stringify({ account, password, remember }), handleAuthError: false,
+  }),
+  logout: () => request<void>('/auth/logout', { method: 'POST', handleAuthError: false }),
+  changePassword: (oldPassword: string, newPassword: string) => request<void>('/auth/password', {
+    method: 'POST', body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }), handleAuthError: false,
+  }),
   tasks: () => request<Task[]>('/tasks'),
   createTask: (input: TaskInput, key: string) => request<Task>('/tasks', {
     method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify(input),

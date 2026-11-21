@@ -4,10 +4,14 @@ import { api, type Action, type AuditEvent, type Task } from './api'
 export type ChatMessage = { role: 'user' | 'assistant'; text: string; requestId?: string; failed?: boolean }
 export type LocalChat = { id: string; conversationId: string | null; title: string; messages: ChatMessage[] }
 
-const CHAT_KEY = 'liuhen.frontend.chats.v1'
-function readChats(): LocalChat[] {
+// 本地对话列表按用户分开保存，同一浏览器切换账号时看不到上一个账号的对话。
+// 多用户改造前的旧键直接丢弃（服务端数据已重建，旧的 conversation_id 已无效）。
+const LEGACY_CHAT_KEY = 'liuhen.frontend.chats.v1'
+let chatKey: string | null = null
+
+function readChats(key: string): LocalChat[] {
   try {
-    const value: unknown = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]')
+    const value: unknown = JSON.parse(localStorage.getItem(key) || '[]')
     return Array.isArray(value) ? value as LocalChat[] : []
   } catch { return [] }
 }
@@ -16,7 +20,7 @@ export const state = reactive({
   tasks: [] as Task[],
   actions: [] as Action[],
   events: [] as AuditEvent[],
-  chats: readChats(),
+  chats: [] as LocalChat[],
   activeChatId: null as string | null,
   loading: false,
   busy: false,
@@ -29,7 +33,25 @@ export const state = reactive({
 })
 
 export function saveChats() {
-  try { localStorage.setItem(CHAT_KEY, JSON.stringify(state.chats)) } catch { /* private browsing */ }
+  if (!chatKey) return
+  try { localStorage.setItem(chatKey, JSON.stringify(state.chats)) } catch { /* private browsing */ }
+}
+
+/** 清空内存中属于上一个用户的数据（登出、会话失效时调用）。 */
+export function clearUserData() {
+  chatKey = null
+  Object.assign(state, {
+    tasks: [], actions: [], events: [], chats: [], activeChatId: null,
+    error: '', toast: '', editorTaskId: null, editorOpen: false, detailTaskId: null,
+  })
+}
+
+/** 切换到某个用户的数据：先清空，再读取该用户的本地对话列表。 */
+export function useUserData(userId: number) {
+  clearUserData()
+  chatKey = `liuhen.chats.${userId}`
+  state.chats = readChats(chatKey)
+  try { localStorage.removeItem(LEGACY_CHAT_KEY) } catch { /* private browsing */ }
 }
 
 export function newChat(): LocalChat {

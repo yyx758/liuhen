@@ -44,11 +44,11 @@ def main() -> None:
         status, app = fetch("/app/", authorization)
         assert status == 200 and b"/app/assets/" in app
         assert fetch("/app/chat", authorization)[0] == 200
-        status, tasks = fetch("/tasks", authorization)
-        assert status == 200 and isinstance(json.loads(tasks), list)
-        status, summary = fetch("/audit/summary", authorization)
-        assert status == 200 and isinstance(json.loads(summary), dict)
-        print("HTTPS、ICP备案页、登录保护、应用和 API：全部通过")
+        # 通过网关后，业务接口还需要应用内登录（会话 Cookie）。
+        for path in ("/tasks", "/audit/summary", "/auth/me"):
+            status, body = fetch(path, authorization)
+            assert status == 401 and json.loads(body)["detail"]["code"] == "unauthenticated", path
+        print("HTTPS、ICP备案页、网关保护、应用页面与应用内登录保护：全部通过")
     else:
         print("HTTPS、ICP备案页和未登录保护：全部通过；未提供凭据，跳过登录后检查")
 

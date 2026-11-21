@@ -21,7 +21,21 @@
 
 后端使用 Python、FastAPI、Pydantic、SQLAlchemy 和 PostgreSQL。模型请求通过 HTTP 发送，`.env` 使用 `python-dotenv` 读取。
 
-账号与数据归属：`users` 表包含唯一用户名、可选唯一邮箱、密码哈希、启用状态和创建／更新时间。任务、提案、会话、对话轮次、幂等记录和操作留痕都带 `user_id`，每个用户只能读写自己的数据；他人的任务、提案、会话按不存在处理（404），他人用过的 `request_id`、`Idempotency-Key` 返回 409 且不回放内容；待办时间冲突只在同一用户内判断。当前尚无注册、登录或会话接口，所有请求暂时归属自动创建的开发用户 `dev`（无法用密码登录）；登录将在多用户改造的后续阶段接入，只保存密码哈希。
+账号与数据归属：`users` 表包含唯一用户名、可选唯一邮箱、密码哈希、启用状态和创建／更新时间。任务、提案、会话、对话轮次、幂等记录和操作留痕都带 `user_id`，每个用户只能读写自己的数据；他人的任务、提案、会话按不存在处理（404），他人用过的 `request_id`、`Idempotency-Key` 返回 409 且不回放内容；待办时间冲突只在同一用户内判断。当前用户来自登录会话，见下文"登录与账号"。
+
+### 登录与账号
+
+- 密码只保存 Argon2id 哈希。登录成功后在 `user_sessions` 记录会话，浏览器拿到 HttpOnly、SameSite=Lax 的 `liuhen_session` Cookie；数据库只存令牌的 SHA-256。勾选"保持登录"时会话 7 天有效，否则 12 小时无操作即失效；每个用户最多保留 10 个会话，过期会话由后台循环每分钟清理。
+- 只有状态为 `active` 的账号能登录；账号不存在与密码错误返回同一提示，密码正确时才告知待审核、已拒绝、已停用。同一 IP 每分钟最多 10 次登录，同一账号连续失败 5 次锁定 15 分钟（进程内计数，单实例部署适用）。
+- 带会话 Cookie 的写请求（以及登录请求）必须带允许的 `Origin` 头，否则返回 403；允许来源由 `allowed_origins`（或 `LIUHEN_ALLOWED_ORIGINS`）配置。本地用 http 访问时把 `cookie_secure` 设为 `false`。
+- 业务接口依赖 `CurrentUserId`：未登录返回 401，管理员重置密码后、修改密码前返回 403 `password_change_required`。认证类错误格式为 `{"detail": {"code": ..., "message": ...}}`。
+- 账号管理命令行（注册与管理员页面尚未实现）：
+
+  ```powershell
+  python -m backend.app.cli create-admin --username <名字> [--email <邮箱>]   # 交互输入密码
+  python -m backend.app.cli promote --username <名字>
+  python -m backend.app.cli reset-password --username <名字>   # 临时密码只显示一次，所有设备下线
+  ```
 
 ```text
 客户端 ── /chat ── chat_service ── agent_runner ── 模型接口
@@ -98,6 +112,10 @@ python -m backend.app.main
 
 | 方法与路径 | 用途 |
 | --- | --- |
+| `POST /auth/login` | 用户名或邮箱 + 密码登录，`remember` 控制是否保持登录 7 天 |
+| `POST /auth/logout` | 删除当前会话并清除 Cookie |
+| `GET /auth/me` | 当前用户信息（含是否需要修改密码） |
+| `POST /auth/password` | 修改密码；其他设备的会话全部失效 |
 | `POST /chat` | 发送一轮自然语言消息；请求包含 `request_id`、`user_text`，后续轮次带上 `conversation_id` |
 | `DELETE /chat/conversations/{conversation_id}` | 删除会话与消息；处理中的会话不可删除，任务与审计保留 |
 | `POST /tasks` | 直接创建任务；请求头包含 `Idempotency-Key` |
@@ -168,4 +186,4 @@ python -m backend.app.evals.run --grade-report backend/evals/results/all.json
 python -m unittest discover -s backend/tests -v
 ```
 
-数据已按用户隔离，但尚未接入登录（见上文"账号与数据归属"）。生产对话自动转为测评候选案例的流程也尚未实现；目前的 21 条测评场景由人工维护。
+注册与审核、管理员接口、每日对话上限尚未实现（见 `docs/prd-multi-user.md`）。生产对话自动转为测评候选案例的流程也尚未实现；目前的 21 条测评场景由人工维护。

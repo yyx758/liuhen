@@ -25,6 +25,10 @@ services:
     environment:
       LIUHEN_DATABASE_HOST: db
       LIUHEN_SQL_ECHO: "false"
+      # 只接受来自本站页面的写请求（Origin 校验）。
+      LIUHEN_ALLOWED_ORIGINS: https://liuhen.yyyyx.top
+      # API 只在 Compose 内部网络可达，信任 Caddy 传来的 X-Forwarded-For，限流才能按真实 IP 计算。
+      FORWARDED_ALLOW_IPS: "*"
     depends_on:
       db:
         condition: service_healthy

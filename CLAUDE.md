@@ -8,7 +8,8 @@
 
 - 优先级：可靠性、可解释性、操作留痕、可验证性，而不是堆功能。
 - 当前已实现：任务管理、AI 对话与提案确认、操作留痕、Vue 3 前端（对话、待办、日历、留痕页）、后端测试与 Agent 测评。
-- 尚未实现（不要因路线图提前实现）：提醒主动推送、文档管理后端与 Agent 工具、偏好管理、账号与权限体系、SSE 流式接口、会话列表/历史的 HTTP 接口。前端资料库只是原型示例，登录页尚未接入后端。多用户改造按 `docs/prd-multi-user.md` 分阶段进行：业务数据已按 `user_id` 隔离，但还没有注册、登录或会话接口，所有请求暂时归属开发用户 `dev`（`api/deps.py` 中的 TEMP 实现，P3 接入登录后删除）。以后实现登录时只存密码哈希。
+- 多用户改造按 `docs/prd-multi-user.md` 分阶段进行。已完成：业务数据按 `user_id` 隔离；账号密码登录（Argon2id 哈希、服务端会话 + HttpOnly Cookie、强制改密、Origin 校验、登录限流）；账号管理命令行 `python -m backend.app.cli`。尚未实现：注册与审核、管理员页面与接口、账号事件、个人设置、每日对话上限（P4、P5）。
+- 尚未实现（不要因路线图提前实现）：提醒主动推送、文档管理后端与 Agent 工具、偏好管理、SSE 流式接口、会话列表/历史的 HTTP 接口。前端资料库只是原型示例。
 
 ## 技术栈与结构
 
@@ -46,6 +47,10 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # 数据库迁移（新库建表或升级到最新；旧库首次需先 stamp，见 backend/README.md）
 alembic -c backend/alembic.ini upgrade head
 
+# 账号管理（交互输入密码；临时密码只显示一次）
+python -m backend.app.cli create-admin --username <名字>
+python -m backend.app.cli reset-password --username <名字>
+
 # 启动后端（http://127.0.0.1:8000，文档 /docs）
 python -m backend.app.main
 
@@ -79,7 +84,7 @@ docker compose -f deploy/compose.yaml logs --tail=100
 python3 deploy/verify_site.py
 ```
 
-`.env` 需填写 `base_url`（完整聊天接口地址）、`api_key`、`model`、`database_url`（`postgresql+psycopg://...`，密码需 URL 编码）；可选 `judge_base_url`、`judge_api_key`、`judge_model`。缺数据库配置时服务拒绝启动。表结构由 Alembic 迁移维护（`backend/migrations/`），数据库版本不是最新时服务拒绝启动；修改 ORM 模型必须同时新增迁移脚本，`test_migrations.py` 会比对迁移结果与模型（`EXCLUDE` 约束只按名字核对）。
+`.env` 需填写 `base_url`（完整聊天接口地址）、`api_key`、`model`、`database_url`（`postgresql+psycopg://...`，密码需 URL 编码）；可选 `judge_base_url`、`judge_api_key`、`judge_model`；本地用 http 访问前端时设 `cookie_secure=false`，`allowed_origins` 默认是本地 Vite 地址。缺数据库配置时服务拒绝启动。表结构由 Alembic 迁移维护（`backend/migrations/`），数据库版本不是最新时服务拒绝启动；修改 ORM 模型必须同时新增迁移脚本，`test_migrations.py` 会比对迁移结果与模型（`EXCLUDE` 约束只按名字核对）。
 
 ## 核心业务规则（改代码前需理解）
 

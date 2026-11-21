@@ -1,7 +1,7 @@
 liuhen.yyyyx.top {
     encode zstd gzip
 
-    @private path /app /app/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/*
+    @private path /app /app/* /auth /auth/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/*
     basic_auth @private {
         {$LIUHEN_AUTH_USER} {$LIUHEN_AUTH_HASH}
     }
@@ -11,7 +11,7 @@ liuhen.yyyyx.top {
         Referrer-Policy same-origin
     }
 
-    @api path /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/*
+    @api path /auth /auth/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/*
     handle @api {
         reverse_proxy api:8000
     }

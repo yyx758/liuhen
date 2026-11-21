@@ -282,7 +282,7 @@ AdminUser   = Annotated[UserORM, Depends(require_admin)]   # 在 require_user �
 ### 7.4 CSRF
 
 - `SameSite=Lax` 已阻止跨站 POST/PATCH/DELETE 携带 Cookie。
-- 再加一层：所有非 GET 请求校验 `Origin` 头（缺失或不在允许列表时拒绝 403）。允许列表来自配置（生产为站点域名，开发为 `http://127.0.0.1:5173` 等）。
+- 再加一层：**带会话 Cookie 的**非 GET 请求，以及 `POST /auth/login`，校验 `Origin` 头（缺失或不在允许列表时拒绝 403）。不带 Cookie 的写请求本来就会 401，不需要校验。允许列表来自配置（生产为站点域名，开发为 `http://127.0.0.1:5173` 等）。
 
 ### 7.5 限流
 
@@ -499,8 +499,8 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 | --- | --- | --- |
 | P1 迁移基础（已完成） | 引入 Alembic、基线迁移、测试建库方式调整 | 现有测试全部通过；线上库可 `stamp` |
 | P2 数据隔离（已完成） | 业务表加 `user_id`、排他约束按用户、服务/仓储/工具全链路传 `user_id`、`request_id` 等归属校验；此阶段请求固定归属开发用户 `dev`（`api/deps.py`，标 `TEMP`） | 13.1 全部通过（`test_user_isolation.py`）；跨用户测评场景与真实模型测评回归待补，见 15.2 |
-| P3 认证会话 | 密码哈希、`user_sessions`、`/auth/*`、`require_user`、CSRF、限流、CLI；前端登录页接入、路由守卫、`localStorage` 隔离 | 13.2 中登录/会话部分通过；删除 P2 的 `TEMP` 注入 |
-| P4 注册审核与账号管理 | 注册、状态机、`/admin/*`、`account_events`、强制改密、个人设置（邮箱、在线设备、登录记录）；前端注册页、改密页、个人设置页、管理后台 | 13.2 全部通过 |
+| P3 认证会话（已完成） | 密码哈希、`user_sessions`、`/auth/login\|logout\|me\|password`、`CurrentUserId` 改为从会话解析、Origin 校验、限流、CLI；前端登录页接入、改密页（因 CLI 的重置密码在本阶段可用，从 P4 提前）、路由守卫、`localStorage` 隔离 | 13.2 中登录/会话部分通过（`test_auth.py`）；P2 的 `TEMP` 注入已删除 |
+| P4 注册审核与账号管理 | 注册、状态机、`/admin/*`、`account_events`、个人设置（邮箱、在线设备、登录记录）；`users` 增加 `reviewed_at`、`reviewed_by`；前端注册页、个人设置页、管理后台 | 13.2 全部通过 |
 | P5 用量与上线 | 每日对话上限与管理员用量统计、Caddy 改造、`verify_site.py` 更新、存量数据迁移演练、文档更新（`CLAUDE.md`、各 README） | 13.3、13.5 通过；在线上库的副本上完整演练 12.2 |
 
 ## 15. 讨论记录
@@ -519,4 +519,5 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 
 ### 15.2 待讨论
 
+2. 错误响应格式（11.2 末段）：目前认证类错误已使用 `{"detail": {"code", "message"}}`，原有业务接口仍是 `{"detail": "文字"}`，前端两种都能解析。统一为一种会影响测评脚本对错误文字的读取，是否在 P4 统一？
 1. P2 未完成的验收项（13.4）：新增一条跨用户测评场景（库中预置另一个用户的同名任务，Agent 不能读到或修改），以及用真实模型重跑 21 条场景确认不退化。新增场景会改变测评总数与评分规则，是否放在 P2 收尾还是 P3 之后？

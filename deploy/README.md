@@ -8,7 +8,8 @@
 2. 在服务器的 `deploy/secrets/` 中创建 `model.env`，仅包含 `LIUHEN_BASE_URL`、`LIUHEN_API_KEY`、`LIUHEN_MODEL`。运行 `python3 deploy/setup_postgres.py` 生成私有的 `postgres.env`；运行 `python3 deploy/setup_auth.py` 生成单用户 `auth.env` 和一次性登录凭据。明文登录密码只保存在权限为 600 的 `deploy/secrets/login-once.txt`；保存后删除该文件。
 3. 检查 `docker compose -f deploy/compose.yaml config --quiet`。这个命令需要上述三个环境文件存在。
 4. 建表：`docker compose -f deploy/compose.yaml run --rm api alembic -c backend/alembic.ini upgrade head`。
-5. 启动 `db`、`api` 和 `web`。PostgreSQL 健康后 API 才会启动；数据库结构版本不是最新时 API 拒绝启动。Caddy 自动申请并续期证书。
+5. 创建管理员：`docker compose -f deploy/compose.yaml run --rm api python -m backend.app.cli create-admin --username <名字>`（交互输入密码）。
+6. 启动 `db`、`api` 和 `web`。PostgreSQL 健康后 API 才会启动；数据库结构版本不是最新时 API 拒绝启动。Caddy 自动申请并续期证书。
 
 `model.env`、`postgres.env` 和 `auth.env` 被 Git 和 Docker 构建上下文忽略，不得提交。服务器初次生成的登录密码应只通过 SSH 获取并妥善保存。
 
