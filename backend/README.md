@@ -21,7 +21,7 @@
 
 后端使用 Python、FastAPI、Pydantic、SQLAlchemy 和 PostgreSQL。模型请求通过 HTTP 发送，`.env` 使用 `python-dotenv` 读取。
 
-账号准备：`users` ORM 表包含唯一用户名、可选唯一邮箱、密码哈希、启用状态和创建／更新时间。连接 PostgreSQL 启动 API 时会自动创建缺失的表；当前不提供注册、密码校验或会话接口，也不将任务等现有记录关联到用户。后续实现登录时只保存密码哈希，不存明文密码；身份与数据归属校验需同时接入。
+账号准备：`users` ORM 表包含唯一用户名、可选唯一邮箱、密码哈希、启用状态和创建／更新时间。表由 Alembic 迁移创建；当前不提供注册、密码校验或会话接口，也不将任务等现有记录关联到用户。后续实现登录时只保存密码哈希，不存明文密码；身份与数据归属校验需同时接入。
 
 ```text
 客户端 ── /chat ── chat_service ── agent_runner ── 模型接口
@@ -75,7 +75,16 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
 在项目根目录的 `.env` 填写 `base_url`（完整的聊天接口地址）、`api_key` 和 `model`。Agent 与测评脚本都直接读取该文件；可选的 `judge_base_url`、`judge_api_key`、`judge_model` 用于独立裁判，未填写时沿用 Agent 模型配置。`.env` 已被 Git 忽略，不要提交真实密钥。
 
-在 `.env` 增加 `database_url=postgresql+psycopg://用户名:URL编码后的密码@127.0.0.1:5432/数据库名`。数据库密码包含 `@`、`/` 等字符时须进行 URL 编码；缺少数据库配置时服务会拒绝启动。现有数据库需具备当前 ORM 定义的字段和约束；启动时不升级旧表结构。
+在 `.env` 增加 `database_url=postgresql+psycopg://用户名:URL编码后的密码@127.0.0.1:5432/数据库名`。数据库密码包含 `@`、`/` 等字符时须进行 URL 编码；缺少数据库配置时服务会拒绝启动。
+
+表结构由 Alembic 迁移维护（`backend/alembic.ini`、`backend/migrations/`），在项目根目录执行：
+
+```powershell
+alembic -c backend/alembic.ini upgrade head   # 新库建表，或把已有库升级到最新
+alembic -c backend/alembic.ini current        # 查看当前版本
+```
+
+启动时如果数据库版本不是最新，服务会拒绝启动并提示执行 `upgrade head`。引入 Alembic 之前由旧版本自动建表的库，先执行一次 `stamp`：没有 `users` 表用 `stamp 0001`，已有则用 `stamp 0002`，然后再 `upgrade head`。修改 ORM 模型时必须同时新增迁移脚本；`backend/tests/test_migrations.py` 会比对迁移结果与模型，发现漏写的迁移。
 
 启动 API：
 
@@ -83,7 +92,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -m backend.app.main
 ```
 
-服务默认监听 `http://127.0.0.1:8000`，交互式接口文档位于 `http://127.0.0.1:8000/docs`。启动时会创建缺失表，并启动提案过期清理任务。PostgreSQL 写入测试可使用 `python -m backend.tests.postgres_smoke`，它创建并清理独立的临时测试库。
+服务默认监听 `http://127.0.0.1:8000`，交互式接口文档位于 `http://127.0.0.1:8000/docs`。启动时会检查数据库结构版本，并启动提案过期清理任务。测试与测评使用的临时库同样通过迁移建表。PostgreSQL 写入测试可使用 `python -m backend.tests.postgres_smoke`，它创建并清理独立的临时测试库。
 
 ## API 概览
 

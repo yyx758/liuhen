@@ -23,7 +23,8 @@
 | `backend/app/services/` | 任务、提案、对话、幂等请求与审计的业务逻辑 |
 | `backend/app/repositories/` | 任务和提案的数据访问 |
 | `backend/app/models/`、`schemas/` | SQLAlchemy 表模型、Pydantic 请求/响应模型 |
-| `backend/app/db/`、`config/` | 数据库连接、时间与模型配置 |
+| `backend/app/db/`、`config/` | 数据库连接、迁移调用、时间与模型配置 |
+| `backend/migrations/` | Alembic 迁移脚本（`alembic.ini` 在 `backend/`） |
 | `backend/app/evals/` | 真实模型测评、评分、裁判与人工校准 |
 | `backend/tests/` | 后端自动化测试 |
 | `frontend/app/` | Vue 3 前端应用 |
@@ -41,6 +42,9 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r backend/requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+
+# 数据库迁移（新库建表或升级到最新；旧库首次需先 stamp，见 backend/README.md）
+alembic -c backend/alembic.ini upgrade head
 
 # 启动后端（http://127.0.0.1:8000，文档 /docs）
 python -m backend.app.main
@@ -67,13 +71,15 @@ python -m backend.app.evals.calibration compare backend/evals/reviews/all-review
 
 ```bash
 docker compose -f deploy/compose.yaml config --quiet
-docker compose -f deploy/compose.yaml up -d --build
+docker compose -f deploy/compose.yaml build api web
+docker compose -f deploy/compose.yaml run --rm api alembic -c backend/alembic.ini upgrade head
+docker compose -f deploy/compose.yaml up -d
 docker compose -f deploy/compose.yaml ps
 docker compose -f deploy/compose.yaml logs --tail=100
 python3 deploy/verify_site.py
 ```
 
-`.env` 需填写 `base_url`（完整聊天接口地址）、`api_key`、`model`、`database_url`（`postgresql+psycopg://...`，密码需 URL 编码）；可选 `judge_base_url`、`judge_api_key`、`judge_model`。缺数据库配置时服务拒绝启动；启动只创建缺失表，不升级旧表结构。
+`.env` 需填写 `base_url`（完整聊天接口地址）、`api_key`、`model`、`database_url`（`postgresql+psycopg://...`，密码需 URL 编码）；可选 `judge_base_url`、`judge_api_key`、`judge_model`。缺数据库配置时服务拒绝启动。表结构由 Alembic 迁移维护（`backend/migrations/`），数据库版本不是最新时服务拒绝启动；修改 ORM 模型必须同时新增迁移脚本，`test_migrations.py` 会比对迁移结果与模型（`EXCLUDE` 约束只按名字核对）。
 
 ## 核心业务规则（改代码前需理解）
 

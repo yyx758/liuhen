@@ -7,9 +7,8 @@ import psycopg
 from psycopg import sql
 from sqlalchemy import create_engine
 
-from backend.app.db.base import Base
+from backend.app.db.migrations import upgrade_to_head
 from backend.app.db.session import DATABASE_URL
-from backend.app.models import action, conversation, operation_event, request, task  # noqa: F401
 
 
 @contextmanager
@@ -26,7 +25,8 @@ def isolated_engine():
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
         engine = create_engine(DATABASE_URL.set(database=name))
         try:
-            Base.metadata.create_all(engine)
+            # 与线上同样走 Alembic 迁移建表，保证测试库结构和迁移结果一致。
+            upgrade_to_head(engine)
             yield engine
         finally:
             engine.dispose()
