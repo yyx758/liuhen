@@ -44,6 +44,7 @@ class CurrentUser:
     role: str
     must_change_password: bool
     created_at: datetime
+    daily_chat_limit: int | None
     session_id: int
 
 
@@ -105,7 +106,8 @@ def find_user_by_account(session: Session, account: str) -> UserORM | None:
 def _to_current(user: UserORM, session_id: int) -> CurrentUser:
     return CurrentUser(
         id=user.id, username=user.username, email=user.email, role=user.role,
-        must_change_password=user.must_change_password, created_at=user.created_at, session_id=session_id,
+        must_change_password=user.must_change_password, created_at=user.created_at,
+        daily_chat_limit=user.daily_chat_limit, session_id=session_id,
     )
 
 

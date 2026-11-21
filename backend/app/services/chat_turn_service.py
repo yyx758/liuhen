@@ -10,7 +10,7 @@ from sqlalchemy import select, text
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.models.conversation import ConversationORM
 from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM
-from backend.app.services import conversation_service
+from backend.app.services import conversation_service, usage_service
 
 
 LEASE_SECONDS = 120
@@ -69,6 +69,9 @@ def acquire_turn(
             turn.owner_token = owner_token
             turn.lease_until = now + LEASE_SECONDS
             return TurnState(request_id, turn.conversation_id, owner_token, list(turn.messages), None)
+
+        # 走到这里才是新的一轮：重试同一 request_id 已在上面返回，不占用额度。
+        usage_service.ensure_quota(session, user_id=user_id, now=now)
 
         if conversation_id is None:
             conversation_id = str(uuid4())

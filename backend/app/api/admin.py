@@ -7,7 +7,8 @@ from fastapi import APIRouter, Query, Response, status
 
 from backend.app.api.deps import AdminUser, DbSession
 from backend.app.schemas.account import (
-    AccountEventRead, AdminUserPage, AdminUserRead, PendingCountRead, ReasonRequest, TemporaryPasswordRead, UserStatus,
+    AccountEventRead, AdminUserPage, AdminUserRead, ChatLimitRequest, PendingCountRead, ReasonRequest,
+    TemporaryPasswordRead, UserStatus,
 )
 from backend.app.services import account_event_service, account_service
 from backend.app.services.account_event_service import EventGroup
@@ -35,6 +36,13 @@ def pending_count(admin: AdminUser, session: DbSession) -> PendingCountRead:
 @router.get("/users/{user_id}", response_model=AdminUserRead)
 def get_user(user_id: int, admin: AdminUser, session: DbSession) -> AdminUserRead:
     return account_service.get_user(session, user_id=user_id)
+
+
+@router.patch("/users/{user_id}", response_model=AdminUserRead)
+def set_chat_limit(user_id: int, data: ChatLimitRequest, admin: AdminUser, session: DbSession) -> AdminUserRead:
+    return account_service.set_chat_limit(
+        session, actor_id=admin.id, target_id=user_id, daily_chat_limit=data.daily_chat_limit,
+    )
 
 
 @router.post("/users/{user_id}/approve", response_model=AdminUserRead)

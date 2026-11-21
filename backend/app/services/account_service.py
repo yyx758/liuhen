@@ -17,7 +17,7 @@ from backend.app.models.account_event import AccountEventORM
 from backend.app.models.user import UserORM
 from backend.app.schemas.account import AdminUserPage, AdminUserRead, RegisterRead
 from backend.app.schemas.auth import UserRead
-from backend.app.services import account_event_service
+from backend.app.services import account_event_service, usage_service
 from backend.app.services.auth_service import (
     hash_password, normalize_account, normalize_email, revoke_sessions, validate_password, validate_username,
 )
@@ -159,7 +159,7 @@ def _review(session: Session, *, actor_id: int, target_id: int, to_status: str, 
             reason=reason, details={"source": "web"},
         )
         session.flush()
-        return _admin_read(user, reason if to_status == "rejected" else None)
+        return _admin_read_with_usage(session, user, reason if to_status == "rejected" else None)
 
 
 def approve(session: Session, *, actor_id: int, target_id: int) -> AdminUserRead:
@@ -197,7 +197,7 @@ def disable(session: Session, *, actor_id: int, target_id: int, reason: str | No
             reason=reason, details={"source": "web", "revoked_sessions": revoked},
         )
         session.flush()
-        return _admin_read(user, reason)
+        return _admin_read_with_usage(session, user, reason)
 
 
 def enable(session: Session, *, actor_id: int, target_id: int) -> AdminUserRead:
@@ -210,7 +210,7 @@ def enable(session: Session, *, actor_id: int, target_id: int) -> AdminUserRead:
             details={"source": "web"},
         )
         session.flush()
-        return _admin_read(user, None)
+        return _admin_read_with_usage(session, user, None)
 
 
 def delete_user(session: Session, *, actor_id: int, target_id: int) -> None:
@@ -226,12 +226,42 @@ def delete_user(session: Session, *, actor_id: int, target_id: int) -> None:
         session.delete(user)
 
 
-def _admin_read(user: UserORM, status_reason: str | None) -> AdminUserRead:
+def set_chat_limit(session: Session, *, actor_id: int, target_id: int, daily_chat_limit: int | None) -> AdminUserRead:
+    """调整每日对话上限；None 表示恢复默认值。立即生效（下一次新建轮次时检查）。"""
+    with session.begin():
+        user = _lock(session, target_id)
+        if user.role == "admin":
+            raise HTTPException(409, "管理员对话不限量，不能设置上限")
+        before = user.daily_chat_limit
+        if before != daily_chat_limit:
+            user.daily_chat_limit = daily_chat_limit
+            account_event_service.record(
+                session, event_type="chat_limit_changed", target_user_id=user.id, actor_user_id=actor_id,
+                details={
+                    "source": "web", "from": before, "to": daily_chat_limit,
+                    "default": usage_service.DEFAULT_DAILY_CHAT_LIMIT,
+                },
+            )
+        session.flush()
+        return _admin_read_with_usage(session, user, None, with_days=True)
+
+
+def _admin_read(user: UserORM, status_reason: str | None, days: list[int], *, with_days: bool = False) -> AdminUserRead:
     return AdminUserRead(
         id=user.id, username=user.username, email=user.email, role=user.role, status=user.status,
         must_change_password=user.must_change_password, created_at=user.created_at,
         last_login_at=user.last_login_at, reviewed_at=user.reviewed_at, status_reason=status_reason,
+        daily_chat_limit=user.daily_chat_limit,
+        chat_limit=usage_service.effective_limit(user.role, user.daily_chat_limit),
+        chat_today=days[-1], chat_week=sum(days), chat_days=days if with_days else None,
     )
+
+
+def _admin_read_with_usage(
+    session: Session, user: UserORM, status_reason: str | None, *, with_days: bool = False,
+) -> AdminUserRead:
+    days = usage_service.week_counts(session, user_ids=[user.id], now=usage_service.current_timestamp())[user.id]
+    return _admin_read(user, status_reason, days, with_days=with_days)
 
 
 def _status_reasons(session: Session, users: list[UserORM]) -> dict[int, str | None]:
@@ -277,13 +307,17 @@ def list_users(
         select(UserORM).where(*conditions).order_by(*order).offset((page - 1) * page_size).limit(page_size)
     ))
     reasons = _status_reasons(session, users)
+    now = usage_service.current_timestamp()
+    weeks = usage_service.week_counts(session, user_ids=[user.id for user in users], now=now)
+    chat_today, chat_week = usage_service.totals(session, now=now)
     counts = {name: 0 for name in STATUSES}
     for name, count in session.execute(select(UserORM.status, func.count(UserORM.id)).group_by(UserORM.status)):
         counts[name] = count
     counts["all"] = sum(counts[name] for name in STATUSES)
     return AdminUserPage(
-        items=[_admin_read(user, reasons.get(user.id)) for user in users],
+        items=[_admin_read(user, reasons.get(user.id), weeks[user.id]) for user in users],
         total=total, page=page, page_size=page_size, counts=counts,
+        chat_today=chat_today, chat_week=chat_week, default_chat_limit=usage_service.DEFAULT_DAILY_CHAT_LIMIT,
     )
 
 
@@ -291,7 +325,7 @@ def get_user(session: Session, *, user_id: int) -> AdminUserRead:
     user = session.get(UserORM, user_id)
     if user is None:
         raise HTTPException(404, "用户不存在")
-    return _admin_read(user, _status_reasons(session, [user]).get(user.id))
+    return _admin_read_with_usage(session, user, _status_reasons(session, [user]).get(user.id), with_days=True)
 
 
 def pending_count(session: Session) -> int:

@@ -66,6 +66,13 @@ class AdminUserRead(BaseModel):
     reviewed_at: datetime | None
     # 已停用 / 已拒绝账号最近一次停用或拒绝时填写的原因（取自账号事件）。
     status_reason: str | None = None
+    # 用户自己设置的上限（为空表示用默认值）与实际生效的上限（管理员不限量时为空）。
+    daily_chat_limit: int | None
+    chat_limit: int | None
+    chat_today: int
+    chat_week: int
+    # 最近 7 个自然日的轮数，从早到晚，最后一项是今天；只在账号详情中返回。
+    chat_days: list[int] | None = None
 
 
 class AdminUserPage(BaseModel):
@@ -75,6 +82,17 @@ class AdminUserPage(BaseModel):
     page_size: int
     # 各状态的账号数（不受搜索词影响），用于筛选 Tab 上的数字。
     counts: dict[str, int]
+    # 全部用户今天与最近 7 天的对话轮数合计，以及默认的每日上限。
+    chat_today: int
+    chat_week: int
+    default_chat_limit: int
+
+
+class ChatLimitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # 必须显式给出：数字表示自定义上限，null 表示恢复默认值。
+    daily_chat_limit: int | None = Field(ge=1, le=1000)
 
 
 class PendingCountRead(BaseModel):

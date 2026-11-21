@@ -29,6 +29,8 @@ class UserORM(Base):
     # 所以这个自引用外键不会挡住删除。
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_users_reviewed_by"), nullable=True)
+    # 每日对话轮数上限；为空时使用配置的默认值。管理员不受限制，也不设置这个值。
+    daily_chat_limit: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
@@ -37,6 +39,7 @@ class UserORM(Base):
         CheckConstraint("status IN ('pending', 'active', 'rejected', 'disabled')", name="ck_users_status"),
         CheckConstraint("username = lower(username)", name="ck_users_username_lower"),
         CheckConstraint("email = lower(email)", name="ck_users_email_lower"),
+        CheckConstraint("daily_chat_limit BETWEEN 1 AND 1000", name="ck_users_daily_chat_limit"),
     )
 
 

@@ -42,6 +42,13 @@ class DeletedChatRequestORM(Base):
     request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     deleted_at: Mapped[int] = mapped_column(nullable=False)
+    # 被删除的那一轮对话的创建时间。删除会话会删掉 chat_turns，
+    # 每日用量要把这里也算上，否则删掉会话就能绕过上限。
+    turn_created_at: Mapped[int] = mapped_column(nullable=False)
+
+    __table_args__ = (
+        Index("ix_deleted_chat_requests_user_id_turn_created_at", "user_id", "turn_created_at"),
+    )
 
 
 class TaskCreateRequestORM(Base):

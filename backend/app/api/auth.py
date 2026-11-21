@@ -7,18 +7,22 @@ from backend.app.config.env import get_auth_config
 from backend.app.schemas.account import (
     EmailChangeRequest, OwnEventRead, RegisterRead, RegisterRequest, RevokedRead, SessionRead,
 )
-from backend.app.schemas.auth import LoginRequest, PasswordChangeRequest, UserRead
-from backend.app.services import account_event_service, account_service, auth_service
+from backend.app.schemas.auth import ChatUsage, LoginRequest, PasswordChangeRequest, UserRead
+from backend.app.services import account_event_service, account_service, auth_service, usage_service
 from backend.app.services.auth_service import REMEMBER_SECONDS, SESSION_COOKIE, CurrentUser
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 COOKIE_SECURE = get_auth_config()["cookie_secure"]
 
 
-def to_user_read(user: CurrentUser) -> UserRead:
+def to_user_read(user: CurrentUser, session: DbSession) -> UserRead:
+    today, limit = usage_service.usage_of(
+        session, user_id=user.id, role=user.role, daily_chat_limit=user.daily_chat_limit,
+    )
     return UserRead(
         id=user.id, username=user.username, email=user.email,
         role=user.role, must_change_password=user.must_change_password, created_at=user.created_at,
+        chat_usage=ChatUsage(today=today, limit=limit),
     )
 
 
@@ -47,7 +51,7 @@ def login(data: LoginRequest, request: Request, response: Response, session: DbS
         max_age=REMEMBER_SECONDS if data.remember else None,
         httponly=True, secure=COOKIE_SECURE, samesite="lax", path="/",
     )
-    return to_user_read(user)
+    return to_user_read(user, session)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -60,8 +64,8 @@ def logout(request: Request, session: DbSession) -> Response:
 
 
 @router.get("/me", response_model=UserRead)
-def me(user: SessionUser) -> UserRead:
-    return to_user_read(user)
+def me(user: SessionUser, session: DbSession) -> UserRead:
+    return to_user_read(user, session)
 
 
 @router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
@@ -78,7 +82,7 @@ def change_email(data: EmailChangeRequest, user: ActiveUser, session: DbSession)
     email = auth_service.change_email(
         session, user_id=user.id, email=data.email, current_password=data.current_password,
     )
-    return to_user_read(user).model_copy(update={"email": email})
+    return to_user_read(user, session).model_copy(update={"email": email})
 
 
 @router.get("/sessions", response_model=list[SessionRead])

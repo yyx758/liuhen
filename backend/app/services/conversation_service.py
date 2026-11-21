@@ -69,13 +69,17 @@ def delete_conversation(session: Session, conversation_id: str, *, user_id: int)
         if active is not None:
             raise HTTPException(409, "会话正在处理消息，请稍后删除")
 
-        request_ids = session.scalars(
-            select(ChatTurnORM.request_id).where(ChatTurnORM.conversation_id == conversation_id)
+        turns = session.execute(
+            select(ChatTurnORM.request_id, ChatTurnORM.created_at)
+            .where(ChatTurnORM.conversation_id == conversation_id)
         ).all()
         deleted_at = now_timestamp()
+        # 保留每轮的创建时间：删除会话后这些轮次仍计入每日用量。
         session.add_all(
-            DeletedChatRequestORM(request_id=request_id, user_id=user_id, deleted_at=deleted_at)
-            for request_id in request_ids
+            DeletedChatRequestORM(
+                request_id=request_id, user_id=user_id, deleted_at=deleted_at, turn_created_at=created_at,
+            )
+            for request_id, created_at in turns
         )
         session.execute(delete(ChatTurnORM).where(ChatTurnORM.conversation_id == conversation_id))
         session.execute(delete(ConversationMessageORM).where(

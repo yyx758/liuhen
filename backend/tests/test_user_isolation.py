@@ -65,7 +65,7 @@ class UserIsolationTests(unittest.TestCase):
                 answer=SECRET_ANSWER, created_at=0,
             ))
             session.add(DeletedChatRequestORM(
-                request_id=self.deleted_request_id, user_id=self.alice, deleted_at=0,
+                request_id=self.deleted_request_id, user_id=self.alice, deleted_at=0, turn_created_at=0,
             ))
 
         api = FastAPI()

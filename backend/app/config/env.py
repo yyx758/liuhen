@@ -23,6 +23,16 @@ def get_judge_config() -> dict[str, str | None]:
     }
 
 
+def get_usage_config() -> dict:
+    """每日对话上限的默认值（D9），用户未单独设置时使用。"""
+    values = dotenv_values(ENV_FILE, interpolate=False)
+    raw = getenv("LIUHEN_DEFAULT_DAILY_CHAT_LIMIT") or values.get("default_daily_chat_limit") or "50"
+    limit = int(raw)
+    if not 1 <= limit <= 1000:
+        raise RuntimeError("default_daily_chat_limit 须在 1–1000 之间")
+    return {"default_daily_chat_limit": limit}
+
+
 def get_auth_config() -> dict:
     """登录 Cookie 与 CSRF 来源校验的配置；部署环境变量优先，本地回退到 .env。"""
     values = dotenv_values(ENV_FILE, interpolate=False)

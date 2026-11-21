@@ -18,6 +18,11 @@ class PasswordChangeRequest(BaseModel):
     new_password: str = Field(min_length=1, max_length=128)
 
 
+class ChatUsage(BaseModel):
+    today: int = Field(description="今天（UTC+08:00）已用的对话轮数")
+    limit: int | None = Field(description="每日上限；管理员不限量时为 null")
+
+
 class UserRead(BaseModel):
     id: int
     username: str
@@ -25,3 +30,4 @@ class UserRead(BaseModel):
     role: str
     must_change_password: bool
     created_at: datetime
+    chat_usage: ChatUsage | None = None
