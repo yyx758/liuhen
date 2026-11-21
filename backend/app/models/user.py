@@ -25,6 +25,10 @@ class UserORM(Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 最近一次审核（通过或拒绝）的时间和管理员。只有 pending/rejected 账号能被删除，审核人一定是 active 管理员，
+    # 所以这个自引用外键不会挡住删除。
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_users_reviewed_by"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
