@@ -48,8 +48,7 @@ def main(argv: list[str] | None = None) -> int:
                 temporary = account_service.reset_password(session, username=args.username)
                 print(f"临时密码（只显示这一次，对方登录后须立即修改）：{temporary}")
     except HTTPException as exc:
-        detail = exc.detail
-        print(detail.get("message", detail) if isinstance(detail, dict) else detail, file=sys.stderr)
+        print(exc.detail, file=sys.stderr)
         return 1
     return 0
 

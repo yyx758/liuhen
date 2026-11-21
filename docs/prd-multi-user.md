@@ -63,6 +63,8 @@
 | D15 | 审核提醒 | 只在界面显示角标（管理员的导航入口和后台"待审核"Tab），不接入邮件、推送或 Webhook |
 | D17 | 存量数据 | 不迁移存量数据，上线时备份后重建数据库（取代 D5 中"存量数据归属初始管理员"）；迁移 `0003` 在业务表已有数据时拒绝执行 |
 | D16 | 管理员对话用量 | `role = admin` 的账号不受每日对话轮数限制；管理员以管理员身份登录前端时，导航中显示"管理"入口 |
+| D18 | 错误响应格式 | 所有接口出错时只返回给用户看的文字 `{"detail": "文字"}`，不带错误码；前端按 HTTP 状态码判断（如 401 跳登录页） |
+| D19 | 测评补充 | 跨用户测评场景与真实模型回归放到多用户需求全部完成、调整测评集之后再做 |
 
 ## 4. 角色与账号状态
 
@@ -227,7 +229,7 @@ ALTER TABLE tasks ADD CONSTRAINT ex_tasks_no_overlap
 | ID | 风险 | 规则 |
 | --- | --- | --- |
 | `POST /chat` 的 `conversation_id` | 往别人的会话追加消息、读取别人的历史 | 会话存在但不属于当前用户 → 404 |
-| `POST /chat` 的 `request_id` | 用户 B 用 A 的 `request_id` 重放，拿到 A 的回答 | `chat_turns` / `deleted_chat_requests` 中已存在且属于别人 → 409 `request_id_conflict`，不返回任何内容 |
+| `POST /chat` 的 `request_id` | 用户 B 用 A 的 `request_id` 重放，拿到 A 的回答 | `chat_turns` / `deleted_chat_requests` 中已存在且属于别人 → 409，不返回任何内容 |
 | `POST /tasks` 的 `Idempotency-Key` | 拿到 A 创建任务的结果快照 | 同上，`task_create_requests` 中属于别人 → 409 |
 | 路径中的 `task_id` / `action_id` | 按自增 ID 枚举 | 查询带 `user_id`，查不到 → 404 |
 
@@ -318,7 +320,7 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 
 - 统计口径：当前用户在 UTC+08:00 自然日内新建的 `chat_turns` 数量（新的 `request_id` 才算一轮；用同一 `request_id` 重试不重复计数）。失败的轮次也计数（模型已被调用）。
 - 上限：用户的 `daily_chat_limit`，为空时取配置项 `LIUHEN_DEFAULT_DAILY_CHAT_LIMIT`（默认 50，D9）。管理员账号不受限制（D16）：检查时 `role = admin` 直接放行，但轮次照常记录，用量统计中仍显示管理员的实际轮数，上限显示为"不限"。管理员的 `daily_chat_limit` 不可设置。
-- 超限时 `POST /chat` 返回 429，错误码 `daily_chat_limit_reached`，前端提示"今日对话次数已用完，明天再来"；不影响任务页面的手动操作。
+- 超限时 `POST /chat` 返回 429，提示文字"今日对话次数已用完，明天再来"；不影响任务页面的手动操作。
 - 检查与新建轮次要在同一事务内完成，避免并发请求同时绕过上限（对该用户行加锁 `SELECT ... FOR UPDATE`，或依赖 `acquire_turn` 现有事务）。
 - `GET /auth/me` 返回今日已用/上限，前端在对话页显示。
 - 管理员列表中的"近 7 天合计"按 UTC+08:00 的最近 7 个自然日（含今天）统计 `chat_turns`，靠 `(user_id, created_at)` 索引查询，不加统计表（D12）。
@@ -415,7 +417,7 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 | `POST /tasks` | `Idempotency-Key` 归属校验 |
 | `GET /actions/pending` | 只返回当前用户的待确认提案 |
 
-错误响应统一为 `{"detail": {"code": "...", "message": "..."}}`，`code` 供前端判断（如 `invalid_credentials`、`account_pending`、`account_rejected`、`account_disabled`、`too_many_attempts`、`password_change_required`、`daily_chat_limit_reached`、`request_id_conflict`）。现有接口的错误格式如与此不同，在实现时统一，不保留两套。
+错误响应统一为 `{"detail": "文字"}`，文字直接展示给用户，不带错误码（D18）；前端只按 HTTP 状态码做统一处理（401 清空本地用户并跳登录页）。强制改密不靠错误码识别：重置密码会让旧会话失效，用临时密码重新登录后由 `must_change_password` 和路由守卫转到改密页。
 
 ## 12. 部署与迁移
 
@@ -463,7 +465,7 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 ### 13.2 认证与账号
 
 - 注册后 `pending` 不能登录；通过后可以；拒绝、禁用后不能。
-- 密码错误和账号不存在返回相同的错误码。
+- 密码错误和账号不存在返回相同的状态码和提示文字。
 - 禁用后已有会话立即失效（下一次请求 401）。
 - 重置密码后旧会话失效；用临时密码登录后只能访问改密相关接口；改密后恢复正常。
 - 不勾选"保持登录"的会话空闲超时；勾选的 7 天后过期。
@@ -485,6 +487,7 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 
 - 测评运行器（`backend/app/evals/run.py`）在隔离库中创建一个测试用户，所有场景以该用户身份执行；21 条场景的业务判定结果与改造前一致。
 - 新增至少 1 条跨用户场景：库中预置另一个用户的同名任务，Agent 不能读到或修改它。
+- 以上两项在多用户需求全部完成、调整测评集之后再做（D19），不作为 P2–P5 单个阶段的完成条件。
 
 ### 13.5 前端
 
@@ -498,7 +501,7 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 | 阶段 | 内容 | 完成标准 |
 | --- | --- | --- |
 | P1 迁移基础（已完成） | 引入 Alembic、基线迁移、测试建库方式调整 | 现有测试全部通过；线上库可 `stamp` |
-| P2 数据隔离（已完成） | 业务表加 `user_id`、排他约束按用户、服务/仓储/工具全链路传 `user_id`、`request_id` 等归属校验；此阶段请求固定归属开发用户 `dev`（`api/deps.py`，标 `TEMP`） | 13.1 全部通过（`test_user_isolation.py`）；跨用户测评场景与真实模型测评回归待补，见 15.2 |
+| P2 数据隔离（已完成） | 业务表加 `user_id`、排他约束按用户、服务/仓储/工具全链路传 `user_id`、`request_id` 等归属校验；此阶段请求固定归属开发用户 `dev`（`api/deps.py`，标 `TEMP`） | 13.1 全部通过（`test_user_isolation.py`）；跨用户测评场景与真实模型测评回归后置（D19） |
 | P3 认证会话（已完成） | 密码哈希、`user_sessions`、`/auth/login\|logout\|me\|password`、`CurrentUserId` 改为从会话解析、Origin 校验、限流、CLI；前端登录页接入、改密页（因 CLI 的重置密码在本阶段可用，从 P4 提前）、路由守卫、`localStorage` 隔离 | 13.2 中登录/会话部分通过（`test_auth.py`）；P2 的 `TEMP` 注入已删除 |
 | P4 注册审核与账号管理 | 注册、状态机、`/admin/*`、`account_events`、个人设置（邮箱、在线设备、登录记录）；`users` 增加 `reviewed_at`、`reviewed_by`；前端注册页、个人设置页、管理后台 | 13.2 全部通过 |
 | P5 用量与上线 | 每日对话上限与管理员用量统计、Caddy 改造、`verify_site.py` 更新、存量数据迁移演练、文档更新（`CLAUDE.md`、各 README） | 13.3、13.5 通过；在线上库的副本上完整演练 12.2 |
@@ -516,8 +519,9 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 | 登录页品牌名 | 沿用"小记" | D13 |
 | 用户名/邮箱能否修改 | 用户名不可改，邮箱可改（需当前密码） | D14 |
 | 审核提醒方式 | 只在界面显示角标 | D15 |
+| 错误响应要不要带错误码 | 不要，只返回给用户看的文字；P3 已有的认证类错误码已去掉 | D18 |
+| 跨用户测评场景与真实模型回归何时做 | 多用户需求完成、调整测评集之后 | D19 |
 
 ### 15.2 待讨论
 
-2. 错误响应格式（11.2 末段）：目前认证类错误已使用 `{"detail": {"code", "message"}}`，原有业务接口仍是 `{"detail": "文字"}`，前端两种都能解析。统一为一种会影响测评脚本对错误文字的读取，是否在 P4 统一？
-1. P2 未完成的验收项（13.4）：新增一条跨用户测评场景（库中预置另一个用户的同名任务，Agent 不能读到或修改），以及用真实模型重跑 21 条场景确认不退化。新增场景会改变测评总数与评分规则，是否放在 P2 收尾还是 P3 之后？
+暂无。

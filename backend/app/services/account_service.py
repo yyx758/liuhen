@@ -2,13 +2,14 @@
 
 import secrets
 
+from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.models.user import UserORM
 from backend.app.schemas.auth import UserRead
 from backend.app.services.auth_service import (
-    auth_error, hash_password, normalize_account, revoke_sessions, validate_password, validate_username,
+    hash_password, normalize_account, revoke_sessions, validate_password, validate_username,
 )
 
 
@@ -18,7 +19,7 @@ def normalize_email(email: str | None) -> str | None:
     email = normalize_account(email)
     local, _, domain = email.partition("@")
     if not local or "." not in domain or len(email) > 255:
-        raise auth_error(422, "invalid_email", "邮箱格式不正确")
+        raise HTTPException(422, "邮箱格式不正确")
     return email
 
 
@@ -31,7 +32,7 @@ def create_admin(session: Session, *, username: str, password: str, email: str |
         if email is not None:
             conditions.append(UserORM.email == email)
         if session.scalar(select(UserORM.id).where(or_(*conditions))) is not None:
-            raise auth_error(409, "account_exists", "用户名或邮箱已被使用")
+            raise HTTPException(409, "用户名或邮箱已被使用")
         user = UserORM(
             username=username, email=email, password_hash=hash_password(password),
             role="admin", status="active",
@@ -50,7 +51,7 @@ def _get_by_username(session: Session, username: str) -> UserORM:
         select(UserORM).where(UserORM.username == normalize_account(username)).with_for_update()
     )
     if user is None:
-        raise auth_error(404, "user_not_found", "用户不存在")
+        raise HTTPException(404, "用户不存在")
     return user
 
 
@@ -58,7 +59,7 @@ def promote_to_admin(session: Session, *, username: str) -> None:
     with session.begin():
         user = _get_by_username(session, username)
         if user.status != "active":
-            raise auth_error(409, "user_not_active", "只能提升状态为正常的账号")
+            raise HTTPException(409, "只能提升状态为正常的账号")
         user.role = "admin"
 
 

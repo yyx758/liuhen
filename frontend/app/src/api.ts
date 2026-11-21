@@ -82,16 +82,13 @@ const BASE = import.meta.env.VITE_API_BASE_URL || ''
 
 export class ApiError extends Error {
   readonly status: number
-  /** 后端认证类错误的机器可读代码，如 invalid_credentials、password_change_required。 */
-  readonly code: string | null
-  constructor(message: string, status: number, code: string | null = null) {
+  constructor(message: string, status: number) {
     super(message)
     this.status = status
-    this.code = code
   }
 }
 
-// 会话失效或需要改密时的统一处理（跳转页面）；由 main.ts 注册，避免这里直接依赖路由。
+// 会话失效（401）时的统一处理（跳转登录页）；由 main.ts 注册，避免这里直接依赖路由。
 let authErrorHandler: ((error: ApiError) => void) | null = null
 export function onAuthError(handler: (error: ApiError) => void) { authErrorHandler = handler }
 
@@ -114,12 +111,10 @@ async function request<T>(path: string, { handleAuthError = true, ...init }: Req
     const body = await response.json().catch(() => null)
     const detail = body?.detail
     let message: string | null = null
-    let code: string | null = null
     if (typeof detail === 'string') message = detail
     else if (Array.isArray(detail)) message = detail.map((item: { msg?: string }) => item.msg).join('；')
-    else if (detail && typeof detail === 'object') { message = detail.message ?? null; code = detail.code ?? null }
-    const error = new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status, code)
-    if (handleAuthError && (response.status === 401 || code === 'password_change_required')) authErrorHandler?.(error)
+    const error = new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status)
+    if (handleAuthError && response.status === 401) authErrorHandler?.(error)
     throw error
   }
   if (response.status === 204) return undefined as T

@@ -89,16 +89,16 @@ class AuthTests(unittest.TestCase):
         wrong = self.login(self.client, "alice", "wrong-password")
         unknown = self.login(self.client, "nobody", PASSWORD)
         self.assertEqual((wrong.status_code, wrong.json()), (unknown.status_code, unknown.json()))
-        self.assertEqual(wrong.json()["detail"]["code"], "invalid_credentials")
+        self.assertEqual(wrong.json()["detail"], "账号或密码错误")
 
     def test_account_status_is_only_revealed_with_correct_password(self) -> None:
-        for status, code in (("pending", "account_pending"), ("rejected", "account_rejected"), ("disabled", "account_disabled")):
+        for status, message in auth_service.STATUS_ERRORS.items():
             with self.subTest(status=status):
                 self.add_user(f"u_{status}", status=status)
-                self.assertEqual(self.login(self.client, f"u_{status}", "wrong-password").json()["detail"]["code"], "invalid_credentials")
+                self.assertEqual(self.login(self.client, f"u_{status}", "wrong-password").json()["detail"], "账号或密码错误")
                 response = self.login(self.client, f"u_{status}")
                 self.assertEqual(response.status_code, 403)
-                self.assertEqual(response.json()["detail"]["code"], code)
+                self.assertEqual(response.json()["detail"], message)
                 self.assertNotIn(SESSION_COOKIE, response.cookies)
 
     def test_remember_and_idle_expiry(self) -> None:
@@ -141,9 +141,9 @@ class AuthTests(unittest.TestCase):
         self.login(self.client, "alice")
 
         wrong = self.client.post("/auth/password", json={"old_password": "nope", "new_password": "new-password-1"})
-        self.assertEqual(wrong.json()["detail"]["code"], "wrong_password")
+        self.assertEqual(wrong.json()["detail"], "当前密码不正确")
         short = self.client.post("/auth/password", json={"old_password": PASSWORD, "new_password": "short"})
-        self.assertEqual(short.json()["detail"]["code"], "weak_password")
+        self.assertEqual(short.json()["detail"], "密码长度须为 8–128 位")
 
         ok = self.client.post("/auth/password", json={"old_password": PASSWORD, "new_password": "new-password-1"})
         self.assertEqual(ok.status_code, 204)
@@ -163,7 +163,7 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(self.client.get("/auth/me").json()["must_change_password"])
         blocked = self.client.get("/tasks")
         self.assertEqual(blocked.status_code, 403)
-        self.assertEqual(blocked.json()["detail"]["code"], "password_change_required")
+        self.assertEqual(blocked.json()["detail"], "管理员已重置你的密码，请先设置新密码")
 
         self.client.post("/auth/password", json={"old_password": temporary, "new_password": "new-password-1"})
         self.assertFalse(self.client.get("/auth/me").json()["must_change_password"])
@@ -175,7 +175,7 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(self.login(self.client, "alice", "wrong-password").status_code, 401)
         locked = self.login(self.client, "alice")
         self.assertEqual(locked.status_code, 429)
-        self.assertEqual(locked.json()["detail"]["code"], "too_many_attempts")
+        self.assertEqual(locked.json()["detail"], "尝试次数过多，请稍后再试")
 
     def test_login_rate_limit_per_ip(self) -> None:
         self.add_user("alice")
@@ -195,7 +195,7 @@ class AuthTests(unittest.TestCase):
                 response = self.client.post("/tasks", headers=headers, json=body)
                 self.client.headers["Origin"] = ORIGIN
                 self.assertEqual(response.status_code, 403)
-                self.assertEqual(response.json()["detail"]["code"], "bad_origin")
+                self.assertEqual(response.json()["detail"], "请求来源不被允许")
         ok = self.client.post("/tasks", headers={"Idempotency-Key": str(uuid4())}, json=body)
         self.assertEqual(ok.status_code, 201, ok.text)
 
@@ -238,18 +238,18 @@ class AccountServiceTests(unittest.TestCase):
         with Session(self.engine) as session:
             self.assertEqual(session.get(UserORM, user.id).status, "active")
 
-        for kwargs, code in (
-            ({"username": "ab", "password": "long-enough-1"}, "invalid_username"),
-            ({"username": "new_one", "password": "short"}, "weak_password"),
-            ({"username": "new_one", "password": "new_one"}, "weak_password"),
-            ({"username": "OWNER", "password": "long-enough-1"}, "account_exists"),
-            ({"username": "new_one", "password": "long-enough-1", "email": "owner@example.com"}, "account_exists"),
-            ({"username": "new_one", "password": "long-enough-1", "email": "not-an-email"}, "invalid_email"),
+        for kwargs, message in (
+            ({"username": "ab", "password": "long-enough-1"}, "用户名须为 3–32 位小写字母、数字或下划线"),
+            ({"username": "new_one", "password": "short"}, "密码长度须为 8–128 位"),
+            ({"username": "new_one", "password": "new_one"}, "密码不能与用户名相同"),
+            ({"username": "OWNER", "password": "long-enough-1"}, "用户名或邮箱已被使用"),
+            ({"username": "new_one", "password": "long-enough-1", "email": "owner@example.com"}, "用户名或邮箱已被使用"),
+            ({"username": "new_one", "password": "long-enough-1", "email": "not-an-email"}, "邮箱格式不正确"),
         ):
             with self.subTest(kwargs=kwargs), Session(self.engine) as session:
                 with self.assertRaises(HTTPException) as raised:
                     account_service.create_admin(session, **kwargs)
-                self.assertEqual(raised.exception.detail["code"], code)
+                self.assertEqual(raised.exception.detail, message)
 
     def test_promote_requires_active_account(self) -> None:
         with Session(self.engine) as session, session.begin():

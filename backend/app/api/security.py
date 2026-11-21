@@ -23,6 +23,6 @@ async def check_origin(request: Request, call_next):
         if origin not in ALLOWED_ORIGINS:
             return JSONResponse(
                 status_code=403,
-                content={"detail": {"code": "bad_origin", "message": "请求来源不被允许"}},
+                content={"detail": "请求来源不被允许"},
             )
     return await call_next(request)

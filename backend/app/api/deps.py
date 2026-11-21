@@ -6,12 +6,12 @@ FastAPI 在同一请求内只执行一次 get_db，三者拿到的是同一个�
 
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from backend.app.db.session import get_db
 from backend.app.services import auth_service
-from backend.app.services.auth_service import SESSION_COOKIE, CurrentUser, auth_error
+from backend.app.services.auth_service import SESSION_COOKIE, CurrentUser
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -19,7 +19,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 def current_session_user(request: Request, session: DbSession) -> CurrentUser:
     user = auth_service.resolve_session(session, request.cookies.get(SESSION_COOKIE))
     if user is None:
-        raise auth_error(401, "unauthenticated", "请先登录")
+        raise HTTPException(401, "请先登录")
     return user
 
 
@@ -29,7 +29,7 @@ SessionUser = Annotated[CurrentUser, Depends(current_session_user)]
 
 def current_user(user: SessionUser) -> CurrentUser:
     if user.must_change_password:
-        raise auth_error(403, "password_change_required", "管理员已重置你的密码，请先设置新密码")
+        raise HTTPException(403, "管理员已重置你的密码，请先设置新密码")
     return user
 
 

@@ -42,10 +42,6 @@ class CurrentUser:
     session_id: int
 
 
-def auth_error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code, {"code": code, "message": message})
-
-
 def now_timestamp() -> int:
     return int(now_utc().timestamp())
 
@@ -73,15 +69,15 @@ def verify_password(password_hash: str, password: str) -> bool:
 def validate_username(username: str) -> str:
     username = normalize_account(username)
     if not USERNAME_PATTERN.fullmatch(username):
-        raise auth_error(422, "invalid_username", "用户名须为 3–32 位小写字母、数字或下划线")
+        raise HTTPException(422, "用户名须为 3–32 位小写字母、数字或下划线")
     return username
 
 
 def validate_password(password: str, username: str) -> None:
     if not PASSWORD_MIN <= len(password) <= PASSWORD_MAX:
-        raise auth_error(422, "weak_password", f"密码长度须为 {PASSWORD_MIN}–{PASSWORD_MAX} 位")
+        raise HTTPException(422, f"密码长度须为 {PASSWORD_MIN}–{PASSWORD_MAX} 位")
     if password.lower() == username.lower():
-        raise auth_error(422, "weak_password", "密码不能与用户名相同")
+        raise HTTPException(422, "密码不能与用户名相同")
 
 
 def find_user_by_account(session: Session, account: str) -> UserORM | None:
@@ -98,9 +94,9 @@ def _to_current(user: UserORM, session_id: int) -> CurrentUser:
 
 
 STATUS_ERRORS = {
-    "pending": ("account_pending", "账号正在审核中，审核通过后即可登录"),
-    "rejected": ("account_rejected", "注册申请未通过"),
-    "disabled": ("account_disabled", "账号已被停用，请联系管理员"),
+    "pending": "账号正在审核中，审核通过后即可登录",
+    "rejected": "注册申请未通过",
+    "disabled": "账号已被停用，请联系管理员",
 }
 
 
@@ -111,7 +107,7 @@ def login(
     """校验账号密码并创建会话，返回 (当前用户, 令牌原文)。令牌原文只交给 Cookie，不入库。"""
     key = normalize_account(account)
     if not login_ip_limiter.allow(ip or "unknown") or login_failure_lock.is_locked(key):
-        raise auth_error(429, "too_many_attempts", "尝试次数过多，请稍后再试")
+        raise HTTPException(429, "尝试次数过多，请稍后再试")
 
     with session.begin():
         user = find_user_by_account(session, key)
@@ -119,11 +115,11 @@ def login(
         if user is None or not password_ok:
             login_failure_lock.record_failure(key)
             # 账号不存在与密码错误使用同一提示。
-            raise auth_error(401, "invalid_credentials", "账号或密码错误")
+            raise HTTPException(401, "账号或密码错误")
         login_failure_lock.clear(key)
         # 只有密码正确时才告诉对方账号状态。
         if user.status in STATUS_ERRORS:
-            raise auth_error(403, *STATUS_ERRORS[user.status])
+            raise HTTPException(403, STATUS_ERRORS[user.status])
 
         if _hasher.check_needs_rehash(user.password_hash):
             user.password_hash = hash_password(password)
@@ -198,9 +194,9 @@ def change_password(
     with session.begin():
         user = session.get(UserORM, user_id, with_for_update=True)
         if user is None or not verify_password(user.password_hash, old_password):
-            raise auth_error(400, "wrong_password", "当前密码不正确")
+            raise HTTPException(400, "当前密码不正确")
         if old_password == new_password:
-            raise auth_error(422, "weak_password", "新密码不能与当前密码相同")
+            raise HTTPException(422, "新密码不能与当前密码相同")
         validate_password(new_password, user.username)
         user.password_hash = hash_password(new_password)
         user.must_change_password = False
