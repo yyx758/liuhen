@@ -368,7 +368,7 @@ IP 取 Caddy 传入的 `X-Forwarded-For`，只信任来自内部网络的代理�
 ### 10.5 全局行为
 
 - 路由守卫：除 `/login`、`/register` 外都需要登录；应用启动时调用 `GET /auth/me` 确定登录状态。
-- `api.ts` 统一处理：401 → 清空用户状态并跳转 `/login?redirect=...`；403 `password_change_required` → 跳转修改密码页；429 → 显示用量提示。
+- `api.ts` 统一处理：401 → 清空用户状态并跳转 `/login?redirect=...`；强制改密由路由守卫根据 `must_change_password` 转到修改密码页；429 → 显示用量提示。
 - 请求使用同源 Cookie（`credentials: 'same-origin'`），前端代码中不读写令牌。
 - 导航区显示当前用户名，提供"个人设置"、"退出登录"。
 - 后端没有的字段仍按 `CLAUDE.md` 规则处理，不把未保存的数据显示为成功。
