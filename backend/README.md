@@ -19,7 +19,7 @@
 
 ## 项目架构
 
-后端使用 Python、FastAPI、Pydantic 和 SQLAlchemy；开发时可连接 PostgreSQL，未配置时回退到 SQLite。模型请求通过 HTTP 发送，`.env` 使用 `python-dotenv` 读取。
+后端使用 Python、FastAPI、Pydantic、SQLAlchemy 和 PostgreSQL。模型请求通过 HTTP 发送，`.env` 使用 `python-dotenv` 读取。
 
 ```text
 客户端 ── /chat ── chat_service ── agent_runner ── 模型接口
@@ -29,7 +29,7 @@
                                                     │
                                                 repositories
                                                     │
-                                            PostgreSQL / SQLite
+                                               PostgreSQL
 
 客户端 ── /audit/events、/audit/events/page、/audit/summary ── audit_service ── operation_events
 ```
@@ -67,13 +67,13 @@ Agent 可以直接创建任务；Agent 提议修改、删除时生成 `pending_a
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install fastapi uvicorn sqlalchemy pydantic httpx python-dotenv
+python -m pip install -r backend/requirements.txt
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
 在项目根目录的 `.env` 填写 `base_url`（完整的聊天接口地址）、`api_key` 和 `model`。Agent 与测评脚本都直接读取该文件；可选的 `judge_base_url`、`judge_api_key`、`judge_model` 用于独立裁判，未填写时沿用 Agent 模型配置。`.env` 已被 Git 忽略，不要提交真实密钥。
 
-连接 PostgreSQL 时，先安装同步驱动 `python -m pip install "psycopg[binary]"`，并在 `.env` 增加 `database_url=postgresql+psycopg://用户名:URL编码后的密码@127.0.0.1:5432/数据库名`。不配置该项时使用本地 SQLite 文件。数据库密码包含 `@`、`/` 等字符时须进行 URL 编码。现有数据库需具备当前 ORM 定义的字段和约束；启动时不再升级旧表结构。
+在 `.env` 增加 `database_url=postgresql+psycopg://用户名:URL编码后的密码@127.0.0.1:5432/数据库名`。数据库密码包含 `@`、`/` 等字符时须进行 URL 编码；缺少数据库配置时服务会拒绝启动。现有数据库需具备当前 ORM 定义的字段和约束；启动时不升级旧表结构。
 
 启动 API：
 
@@ -81,7 +81,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -m backend.app.main
 ```
 
-服务默认监听 `http://127.0.0.1:8000`，交互式接口文档位于 `http://127.0.0.1:8000/docs`。本地 SQLite 文件是 `backend/liuhen_dev.db`；启动时会创建缺失表，并启动提案过期清理任务。PostgreSQL 写入测试可使用 `python -m backend.tests.postgres_smoke`，它创建并清理独立的临时测试库。
+服务默认监听 `http://127.0.0.1:8000`，交互式接口文档位于 `http://127.0.0.1:8000/docs`。启动时会创建缺失表，并启动提案过期清理任务。PostgreSQL 写入测试可使用 `python -m backend.tests.postgres_smoke`，它创建并清理独立的临时测试库。
 
 ## API 概览
 

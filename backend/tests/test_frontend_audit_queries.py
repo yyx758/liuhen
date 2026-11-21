@@ -1,14 +1,11 @@
-import tempfile
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session
 
 from backend.app.api import actions as actions_api, tasks as tasks_api
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.models.conversation import ConversationORM
 from backend.app.models.request import ChatTurnORM
 from backend.app.schemas.task import TaskCreate, TaskUpdate
@@ -17,15 +14,12 @@ from backend.app.services import action_service, audit_service, task_service
 
 class FrontendAuditQueryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.engine = create_engine(URL.create(
-            "sqlite+pysqlite", database=str(Path(self.directory.name) / "queries.db")
-        ))
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
 
     def tearDown(self) -> None:
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     def test_cursor_summary_and_task_origin(self) -> None:
         with Session(self.engine) as session:

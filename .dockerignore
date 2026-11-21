@@ -1,0 +1,13 @@
+.git
+.idea
+.venv
+.env
+.env.*
+**/__pycache__
+**/*.py[cod]
+frontend/app/node_modules
+frontend/app/dist
+frontend/reference
+backend/evals
+backend/tests
+deploy/secrets

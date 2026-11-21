@@ -5,8 +5,7 @@
 .idea/
 __pycache__/
 *.py[cod]
-*.db
-*.db-*
 frontend/app/node_modules/
 backend/evals/results/
 backend/evals/reviews/
+deploy/secrets/

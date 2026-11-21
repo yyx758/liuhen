@@ -1,34 +1,35 @@
 from collections.abc import Iterator
 from os import getenv
-from pathlib import Path
 
 from dotenv import dotenv_values
-from sqlalchemy import create_engine, URL
-from sqlalchemy.engine import make_url
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.config.env import ENV_FILE
 
 
-# 数据库文件路径
-BACKEND_DIR = Path(__file__).resolve().parents[2]
-DB_PATH = BACKEND_DIR / "liuhen_dev.db"
-
-SQLITE_URL = URL.create(
-    "sqlite+pysqlite",
-    database=str(DB_PATH)
-)
-DATABASE_URL = (
-    getenv("LIUHEN_DATABASE_URL")
-    or dotenv_values(ENV_FILE, interpolate=False).get("database_url")
-    or SQLITE_URL
-)
+configured_url = getenv("LIUHEN_DATABASE_URL") or dotenv_values(ENV_FILE, interpolate=False).get("database_url")
+if configured_url:
+    DATABASE_URL = make_url(configured_url)
+else:
+    required = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB")
+    if any(not getenv(name) for name in required):
+        raise RuntimeError("请配置 database_url 或 POSTGRES_USER、POSTGRES_PASSWORD、POSTGRES_DB")
+    DATABASE_URL = URL.create(
+        "postgresql+psycopg",
+        username=getenv("POSTGRES_USER"),
+        password=getenv("POSTGRES_PASSWORD"),
+        host=getenv("LIUHEN_DATABASE_HOST", "db"),
+        database=getenv("POSTGRES_DB"),
+    )
+if DATABASE_URL.get_backend_name() != "postgresql":
+    raise RuntimeError("留痕仅支持 PostgreSQL 数据库")
 
 # Engine：数据库连接基础设施
 engine = create_engine(
     DATABASE_URL,
-    echo=True,
-    **({"connect_args": {"check_same_thread": False}} if make_url(DATABASE_URL).get_backend_name() == "sqlite" else {})
+    echo=getenv("LIUHEN_SQL_ECHO", "true").lower() in {"1", "true", "yes"},
 )
 
 # Session 工厂

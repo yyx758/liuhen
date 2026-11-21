@@ -1,19 +1,17 @@
 import json
-import tempfile
 import unittest
 from datetime import datetime
 from uuid import uuid4
-from pathlib import Path
 from unittest.mock import patch
 
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import URL, create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.config.settings import USER_TIMEZONE
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.db.session import get_db
 from backend.app.main import app
 from backend.app.models.conversation import ConversationMessageORM, ConversationORM
@@ -25,17 +23,13 @@ from backend.app.services import chat_service, conversation_service
 
 class ChatApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.engine = create_engine(URL.create(
-            "sqlite+pysqlite",
-            database=str(Path(self.directory.name) / "chat_api.db"),
-        ))
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     async def test_injected_clock_and_session_factory_cover_full_turn(self) -> None:
         request_id = str(uuid4())

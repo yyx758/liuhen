@@ -1,30 +1,24 @@
-import tempfile
 import unittest
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import URL, create_engine
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.models.conversation import ConversationORM
 from backend.app.services import chat_turn_service, conversation_service
 
 
 class ConversationStorageTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.database_url = URL.create(
-            "sqlite+pysqlite",
-            database=str(Path(self.directory.name) / "conversations.db"),
-        )
-        self.engine = create_engine(self.database_url)
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
+        self.database_url = self.engine.url
 
     def tearDown(self) -> None:
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     def test_history_survives_reopening_database(self) -> None:
         with Session(self.engine) as session:

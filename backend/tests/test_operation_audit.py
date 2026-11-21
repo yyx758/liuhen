@@ -1,15 +1,13 @@
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import URL, create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.db.base import Base
+from backend.app.db.isolated import isolated_engine
 from backend.app.db.session import get_db
 from backend.app.main import app
 from backend.app.models.action import PendingActionORM
@@ -23,16 +21,13 @@ from backend.app.services import action_service, audit_service, task_service
 
 class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.engine = create_engine(URL.create(
-            "sqlite+pysqlite", database=str(Path(self.directory.name) / "audit.db")
-        ))
-        Base.metadata.create_all(self.engine)
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
         self.engine.dispose()
-        self.directory.cleanup()
+        self.database.__exit__(None, None, None)
 
     def create(self, title="原任务", start="2030-01-02T14:00:00+08:00", request_id=None):
         with Session(self.engine) as session:
