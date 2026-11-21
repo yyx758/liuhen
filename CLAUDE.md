@@ -65,8 +65,8 @@ python -m unittest discover -s backend/tests -v
 python -m backend.tests.postgres_smoke   # 使用独立临时库的 PostgreSQL 写入冒烟测试
 
 # 测评（真实模型、隔离临时数据库）
-python -m backend.app.evals.run --case 01 --trials 3 --now 2026-11-18T10:00:00+08:00
-python -m backend.app.evals.run --all --trials 3 --now 2026-11-18T10:00:00+08:00
+python -m backend.app.evals.run --case 01 --trials 3
+python -m backend.app.evals.run --all --trials 3          # 加 --anchors all 跑三个固定时间点
 python -m backend.app.evals.run --grade-report backend/evals/results/all.json   # 只重新评分
 python -m backend.app.evals.calibration sample backend/evals/results/all.json --rate 0.2 --seed 42
 python -m backend.app.evals.calibration compare backend/evals/reviews/all-review.json
@@ -112,7 +112,7 @@ python3 deploy/verify_site.py
 
 - 验证创建流程优先使用隔离数据库；不要为测试反复执行会写入真实数据库的创建提示词。
 - 验证 Agent 时同时关注最终业务状态与工具调用过程。
-- 测评共 21 条场景（第 14 条每次覆盖三种并发变体，3 轮共 69 份记录）。业务分 0/100 由程序判定；回复分 0/33/67/100 由 LLM 裁判给出，裁判失败为 `null`。`backend/evals/results/`、`reviews/` 已被 Git 忽略。
+- 测评共 26 条场景（第 14 条每次覆盖三种并发变体，3 轮共 84 份记录；第 22–24 条为跨用户隔离）。默认在固定时间点 2026-11-18 10:00（UTC+08:00）运行，`--anchors all` 另跑跨周、跨年两个时间点。业务分 0/100 由程序判定；回复分 0/33/67/100 由 LLM 裁判给出，裁判失败为 `null`。`backend/evals/results/`、`reviews/` 已被 Git 忽略。
 - `线上问题记录.md` 只记录实际发生的问题，追加不覆盖；未核实内容标注"待确认"，不推测根因或宣称已修复。
 
 ## 与作者协作

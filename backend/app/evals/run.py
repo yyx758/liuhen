@@ -27,6 +27,14 @@ from backend.app.services.task_service import to_task_read
 
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "evals" / "results"
 
+# 固定的测评时间点，保证"明天""下周三"等表达在不同日期运行时含义不变、结果可比。
+# 默认只跑 standard；--anchors all 依次跑全部，专门检查跨周、跨年的时间理解。
+ANCHORS = {
+    "standard": "2026-11-18T10:00:00+08:00",      # 周三上午
+    "sunday_night": "2026-11-22T21:30:00+08:00",  # 周日晚上："明天"跨周、"下周三"只隔三天
+    "year_end": "2026-12-31T16:00:00+08:00",      # 年末："明天""后天"跨年
+}
+
 
 def local_now(value: datetime | None) -> datetime:
     if value is None:
@@ -36,7 +44,8 @@ def local_now(value: datetime | None) -> datetime:
     return value.astimezone(USER_TIMEZONE)
 
 
-def collect_state(session_factory, turns: list[dict]) -> dict:
+def collect_state(session_factory, turns: list[dict], *, user_id: int, other_user_id: int) -> dict:
+    """测评用户的任务、提案与审计；另一个用户的数据单独返回，用来断言它没有被读到或改动。"""
     with session_factory() as session:
         for entry in turns:
             stored = session.get(ChatTurnORM, entry["request_id"])
@@ -46,16 +55,22 @@ def collect_state(session_factory, turns: list[dict]) -> dict:
                 if entry.get("reply") is None:
                     entry["reply"] = stored.answer
 
-        tasks = [
-            to_task_read(task).model_dump(mode="json")
-            for task in session.scalars(select(TaskORM).order_by(TaskORM.id))
-        ]
-        actions = [
-            to_action_read(action).model_dump(mode="json")
-            for action in session.scalars(
-                select(PendingActionORM).order_by(PendingActionORM.id)
-            )
-        ]
+        def tasks_of(owner: int) -> list[dict]:
+            return [
+                to_task_read(task).model_dump(mode="json")
+                for task in session.scalars(select(TaskORM).where(TaskORM.user_id == owner).order_by(TaskORM.id))
+            ]
+
+        def actions_of(owner: int) -> list[dict]:
+            return [
+                to_action_read(action).model_dump(mode="json")
+                for action in session.scalars(
+                    select(PendingActionORM).where(PendingActionORM.user_id == owner).order_by(PendingActionORM.id)
+                )
+            ]
+
+        tasks = tasks_of(user_id)
+        actions = actions_of(user_id)
         audit_events = [
             {
                 "id": event.id,
@@ -74,15 +89,21 @@ def collect_state(session_factory, turns: list[dict]) -> dict:
                 ).isoformat(),
             }
             for event in session.scalars(
-                select(OperationEventORM).order_by(OperationEventORM.id)
+                select(OperationEventORM).where(OperationEventORM.user_id == user_id).order_by(OperationEventORM.id)
             )
         ]
-        return {"tasks": tasks, "actions": actions, "audit_events": audit_events}
+        other_audit = session.scalars(
+            select(OperationEventORM.event_type).where(OperationEventORM.user_id == other_user_id)
+        ).all()
+        return {
+            "tasks": tasks, "actions": actions, "audit_events": audit_events,
+            "other_user": {"tasks": tasks_of(other_user_id), "actions": actions_of(other_user_id), "audit_events": list(other_audit)},
+        }
 
 
 async def run_case(
     case_id: str, evaluation_now: datetime | None = None,
-    *, race_preference: str | None = None,
+    *, race_preference: str | None = None, anchor: str | None = None,
 ) -> dict:
     """Execute one scenario and retain evidence even when its workflow fails."""
     if case_id not in CASE_MESSAGES:
@@ -95,15 +116,19 @@ async def run_case(
         session_factory = sessionmaker(bind=engine)
         context = ScenarioContext(session_factory, run_now, race_preference)
         initial_tasks = []
+        initial_other_tasks = []
         run_error = None
+        owners = {"user_id": context.user_id, "other_user_id": context.other_user_id}
         try:
             seed_case(case_id, context)
-            initial_tasks = collect_state(session_factory, [])["tasks"]
+            initial = collect_state(session_factory, [], **owners)
+            initial_tasks = initial["tasks"]
+            initial_other_tasks = initial["other_user"]["tasks"]
             await execute_case(case_id, context)
         except Exception as exc:
             run_error = f"{type(exc).__name__}: {exc}"
 
-        final_state = collect_state(session_factory, context.turns)
+        final_state = collect_state(session_factory, context.turns, **owners)
         last_turn = context.turns[-1] if context.turns else {}
         return {
             "case_id": case_id,
@@ -114,6 +139,7 @@ async def run_case(
             ),
             "planned_user_messages": CASE_MESSAGES[case_id],
             "evaluation_now": run_now.isoformat(timespec="seconds"),
+            "anchor": anchor,
             "model": get_model_config()["model"],
             "initial_tasks": initial_tasks,
             "turns": context.turns,
@@ -121,6 +147,7 @@ async def run_case(
             "tasks": final_state["tasks"],
             "actions": final_state["actions"],
             "audit_events": final_state["audit_events"],
+            "other_user": {**final_state["other_user"], "initial_tasks": initial_other_tasks},
             "run_error": run_error,
             # Keep the single-turn fields convenient for the first case.
             "request_id": last_turn.get("request_id"),
@@ -131,18 +158,36 @@ async def run_case(
         }
 
 
+def group_key(result: dict) -> str:
+    """同一场景、变体、时间点的多次运行归为一组，用来看稳定性。"""
+    anchor = result.get("anchor") or result.get("evaluation_now")
+    return f"{result['case_id']}:{result.get('variant') or 'default'}@{anchor}"
+
+
 def summarize(report: dict) -> None:
-    results = report["results"]
-    business = [r["business_accuracy"]["score"] for r in results if "business_accuracy" in r]
+    results = [r for r in report["results"] if "business_accuracy" in r]
+    business = [r["business_accuracy"]["score"] for r in results]
     replies = [
         r["agent_reply_quality"]["score"] for r in results
         if r.get("agent_reply_quality", {}).get("score") is not None
     ]
+    # 平均分会掩盖不稳定（3 次里过 2 次也有 67 分），所以同时给出每组的通过次数，
+    # 以及"每次运行都通过"的组占比（pass^k）。
+    groups: dict[str, list[bool]] = {}
+    for result in results:
+        groups.setdefault(group_key(result), []).append(result["business_accuracy"]["score"] == 100)
     report["summary"] = {
-        "runs": len(results),
+        "runs": len(report["results"]),
         "business_accuracy_mean": round(sum(business) / len(business), 2) if business else None,
+        "business_all_runs_pass_rate": (
+            round(sum(all(passes) for passes in groups.values()) / len(groups), 4) if groups else None
+        ),
         "agent_reply_quality_mean": round(sum(replies) / len(replies), 2) if replies else None,
         "judge_error_count": sum(bool(r.get("agent_reply_quality", {}).get("judge_error")) for r in results),
+        "judge_skipped_count": sum(bool(r.get("agent_reply_quality", {}).get("skipped")) for r in results),
+        "unstable_or_failing": {
+            key: f"{sum(passes)}/{len(passes)}" for key, passes in groups.items() if not all(passes)
+        },
     }
 
 
@@ -177,30 +222,32 @@ async def grade_existing_report(report: dict, output_path: Path) -> dict:
 
 
 async def run_suite(
-    case_ids: list[str], trials: int = 1, evaluation_now: datetime | None = None,
+    case_ids: list[str], trials: int = 1, anchors: dict[str, datetime] | None = None,
     *, output_path: Path | None = None,
 ) -> dict:
     if trials < 1:
         raise ValueError("运行次数必须至少为 1")
-    run_now = local_now(evaluation_now)
+    if not anchors:
+        anchors = {"standard": datetime.fromisoformat(ANCHORS["standard"])}
     report = {
-        "evaluation_now": run_now.isoformat(timespec="seconds"),
+        "evaluation_nows": {label: local_now(value).isoformat(timespec="seconds") for label, value in anchors.items()},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model": get_model_config()["model"],
         "judge_model": get_judge_config()["model"],
         "results": [],
     }
-    for case_id in case_ids:
-        for trial in range(1, trials + 1):
-            variants = ("confirm", "cancel", None) if case_id == "14" else (None,)
-            for variant in variants:
-                result = await run_case(case_id, run_now, race_preference=variant)
-                result["trial"] = trial
-                await grade_result(result)
-                report["results"].append(result)
-                summarize(report)
-                if output_path is not None:
-                    write_report(output_path, report)
+    for label, anchor_now in anchors.items():
+        for case_id in case_ids:
+            for trial in range(1, trials + 1):
+                variants = ("confirm", "cancel", None) if case_id == "14" else (None,)
+                for variant in variants:
+                    result = await run_case(case_id, anchor_now, race_preference=variant, anchor=label)
+                    result["trial"] = trial
+                    await grade_result(result)
+                    report["results"].append(result)
+                    summarize(report)
+                    if output_path is not None:
+                        write_report(output_path, report)
     return report
 
 
@@ -208,15 +255,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="运行真实模型的隔离 Agent 测评场景")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--case", choices=sorted(CASE_MESSAGES))
-    selection.add_argument("--all", action="store_true", help="运行全部 21 条场景")
+    selection.add_argument("--all", action="store_true", help=f"运行全部 {len(CASE_MESSAGES)} 条场景")
     selection.add_argument(
         "--grade-report", type=Path,
         help="对已有运行报告评分，不重新调用 Agent",
     )
     parser.add_argument("--trials", type=int, default=1, help="每条场景运行次数")
-    parser.add_argument(
+    timing = parser.add_mutually_exclusive_group()
+    timing.add_argument(
         "--now", type=datetime.fromisoformat,
-        help="固定测评时钟，例如 2026-11-17T10:00:00+08:00",
+        help="自定义测评时钟，例如 2026-11-17T10:00:00+08:00；不填时使用固定时间点 standard",
+    )
+    timing.add_argument(
+        "--anchors", choices=["standard", "all"], default="standard",
+        help="all：依次在 " + "、".join(ANCHORS) + " 三个固定时间点运行",
     )
     parser.add_argument(
         "--output", type=Path,
@@ -247,8 +299,13 @@ def main() -> None:
     report_name = "all" if args.all else case_ids[0]
     output_path = args.output or next_report_path(report_name)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.now is not None:
+        anchors = {"custom": args.now}
+    else:
+        labels = ANCHORS if args.anchors == "all" else {"standard": ANCHORS["standard"]}
+        anchors = {label: datetime.fromisoformat(value) for label, value in labels.items()}
     report = asyncio.run(run_suite(
-        case_ids, args.trials, args.now, output_path=output_path,
+        case_ids, args.trials, anchors, output_path=output_path,
     ))
     print(f"测评完成：{output_path}\n{json.dumps(report['summary'], ensure_ascii=False)}")
 

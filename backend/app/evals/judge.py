@@ -64,6 +64,30 @@ def tool_evidence(result: dict) -> list[dict]:
     return evidence
 
 
+# 这两个工具成功后，本轮回复由 tool_registry.format_proposal 按提案快照生成，不是模型写的。
+TEMPLATE_REPLY_TOOLS = {"propose_update", "propose_delete"}
+
+
+def is_template_reply(result: dict) -> bool:
+    """最后一轮成功生成了提案时，回复主体是固定模板；送裁判只是在给模板打分。"""
+    turns = result.get("turns") or []
+    if not turns:
+        return False
+    names: dict[str, str] = {}
+    for message in turns[-1].get("messages", []):
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                names[call.get("id")] = call.get("function", {}).get("name")
+        elif message.get("role") == "tool" and names.get(message.get("tool_call_id")) in TEMPLATE_REPLY_TOOLS:
+            try:
+                output = json.loads(message.get("content") or "")
+            except ValueError:
+                continue
+            if not (isinstance(output, dict) and output.get("ok") is False):
+                return True
+    return False
+
+
 def judge_material(result: dict) -> dict:
     rubric = reply_rubric(result)
     return {
@@ -111,6 +135,11 @@ async def judge_reply(result: dict) -> dict:
         "judge_model": judge_name,
         "same_model_as_agent": judge_name == agent_config["model"],
     }
+    if is_template_reply(result):
+        return {
+            **metadata, "score": None, "skipped": "template_reply", "judge_error": None,
+            "reason": "最后一轮回复由提案模板生成，不送裁判；提案内容由业务分检查",
+        }
     if not all(config.values()):
         return {**metadata, "score": None, "judge_error": "裁判模型配置不完整"}
     material = judge_material(result)

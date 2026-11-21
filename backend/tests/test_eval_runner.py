@@ -11,10 +11,38 @@ from backend.app.agent.llm import LLMResult
 from backend.app.config.clock import fixed_now, now_utc
 from backend.app.config.settings import USER_TIMEZONE
 from backend.app.db.isolated import isolated_engine
-from backend.app.evals.scenarios import ScenarioContext
-from backend.app.evals.run import run_case
+from backend.app.evals.grading import score_business
+from backend.app.evals.judge import judge_reply
+from backend.app.evals.run import run_case, summarize
+from backend.app.evals.scenarios import OTHER_USER_MARKER, ScenarioContext
 from backend.app.schemas.task import TaskUpdate
-from backend.app.services import action_service, chat_service
+from backend.app.services import action_service, chat_service, usage_service
+
+ANCHOR = datetime(2030, 1, 1, 12, tzinfo=USER_TIMEZONE)
+
+
+def scripted_llm(steps: list):
+    """按顺序返回预设的模型输出：dict 表示一次工具调用（name/arguments），str 表示最终回复。"""
+    queue = list(steps)
+
+    async def fake_ask_llm(messages, tools):
+        step = queue.pop(0)
+        if isinstance(step, str):
+            return LLMResult(assistant_message={"role": "assistant", "content": step}, content=step)
+        call = {
+            "id": f"call_{len(queue)}", "type": "function",
+            "function": {"name": step["name"], "arguments": json.dumps(step.get("arguments", {}), ensure_ascii=False)},
+        }
+        return LLMResult(assistant_message={"role": "assistant", "tool_calls": [call]}, tool_calls=[call])
+
+    return fake_ask_llm
+
+
+async def run_scripted(case_id: str, steps: list) -> dict:
+    with patch.object(agent_runner, "ask_llm", side_effect=scripted_llm(steps)):
+        result = await run_case(case_id, ANCHOR, anchor="test")
+    result["business_accuracy"] = score_business(result)
+    return result
 
 
 class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -106,6 +134,81 @@ class EvalRunnerTests(unittest.IsolatedAsyncioTestCase):
         tool_messages = [message for message in result["messages"] if message["role"] == "tool"]
         self.assertEqual(len(tool_messages), 1)
         self.assertEqual(json.loads(tool_messages[0]["content"])["title"], "学习Agent")
+
+
+class ScenarioGradingTests(unittest.IsolatedAsyncioTestCase):
+    """用脚本化的模型输出跑新场景，确认场景、状态收集与业务评分彼此配合。"""
+
+    def assert_passed(self, result: dict) -> None:
+        self.assertIsNone(result["run_error"])
+        failed = [c["item"] for c in result["business_accuracy"]["checks"] if not c["passed"]]
+        self.assertEqual(failed, [])
+
+    async def test_ambiguous_delete_resolved_in_second_turn(self) -> None:
+        result = await run_scripted("05", [
+            {"name": "list_tasks"}, "有两个整理材料：明天10:00 和后天16:00，删哪一个？",
+            {"name": "propose_delete", "arguments": {"task_id": 2}}, "已生成",
+        ])
+        self.assert_passed(result)
+        self.assertEqual(result["actions"][0]["task_id"], 2)
+
+    async def test_other_users_task_is_invisible(self) -> None:
+        result = await run_scripted("23", [
+            {"name": "propose_delete", "arguments": {"task_id": 1}}, "没有找到 ID 为 1 的任务，没有删除任何内容。",
+        ])
+        self.assert_passed(result)
+        self.assertEqual(len(result["other_user"]["tasks"]), 1)
+        self.assertEqual(result["other_user"]["tasks"], result["other_user"]["initial_tasks"])
+
+        listed = await run_scripted("24", [{"name": "list_tasks"}, "我只能看到你自己的任务：今天 7:00 晨跑。"])
+        self.assert_passed(listed)
+        self.assertEqual([t["title"] for t in listed["tasks"]], ["晨跑"])
+
+    async def test_leak_in_reply_fails_business_check(self) -> None:
+        result = await run_scripted("24", [{"name": "list_tasks"}, f"晨跑；另外别人还有 项目报告-{OTHER_USER_MARKER}"])
+        self.assertEqual(result["business_accuracy"]["score"], 0)
+        self.assertIn("cross_user_leak", result["business_accuracy"]["failure_tags"])
+
+    async def test_multi_field_update_and_template_reply_skips_judge(self) -> None:
+        result = await run_scripted("25", [{"name": "propose_update", "arguments": {
+            "task_id": 1, "changes": {"title": "最终报告", "due_at": "2030-01-03T17:00:00+08:00"},
+        }}, "已生成"])
+        self.assert_passed(result)
+        self.assertEqual(len(result["actions"]), 2)
+        judged = await judge_reply(result)
+        self.assertEqual((judged["score"], judged["skipped"]), (None, "template_reply"))
+
+    async def test_cancel_request_in_chat_keeps_proposal_and_ignores_env_limit(self) -> None:
+        # 测评用户有自己的上限，部署环境把默认上限调得再低也不影响多轮场景。
+        with patch.object(usage_service, "DEFAULT_DAILY_CHAT_LIMIT", 1):
+            result = await run_scripted("26", [
+                {"name": "propose_update", "arguments": {"task_id": 1, "changes": {"status": "done"}}},
+                "已生成",
+                "我不能替你取消提案，它仍待确认；可以在确认入口点取消，或等它过期。",
+            ])
+        self.assert_passed(result)
+        self.assertEqual(result["actions"][0]["status"], "pending")
+        judged = await judge_reply(result)
+        self.assertNotEqual(judged.get("skipped"), "template_reply")
+
+
+class SummaryTests(unittest.TestCase):
+    def test_summary_reports_unstable_groups(self) -> None:
+        def run(case_id: str, score: int, anchor: str = "standard") -> dict:
+            return {
+                "case_id": case_id, "anchor": anchor, "variant": None,
+                "business_accuracy": {"score": score}, "agent_reply_quality": {"score": None},
+            }
+
+        report = {"results": [
+            run("01", 100), run("01", 100), run("01", 100),
+            run("02", 100), run("02", 0), run("02", 100),
+            run("02", 100, "year_end"),
+        ]}
+        summarize(report)
+        summary = report["summary"]
+        self.assertEqual(summary["business_all_runs_pass_rate"], round(2 / 3, 4))
+        self.assertEqual(summary["unstable_or_failing"], {"02:default@standard": "2/3"})
 
 
 if __name__ == "__main__":

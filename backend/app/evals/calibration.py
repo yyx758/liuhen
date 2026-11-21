@@ -17,7 +17,9 @@ REPLY_SCORES = {0, 33, 67, 100}
 
 
 def review_id(result: dict) -> str:
-    return f"{result['case_id']}:{result['trial']}:{result.get('variant') or 'default'}"
+    base = f"{result['case_id']}:{result['trial']}:{result.get('variant') or 'default'}"
+    # 多个测评时间点的同一场景要区分；旧报告没有 anchor 字段，ID 保持不变。
+    return f"{base}@{result['anchor']}" if result.get("anchor") else base
 
 
 def report_hash(path: Path) -> str:
