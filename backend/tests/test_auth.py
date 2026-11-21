@@ -241,7 +241,7 @@ class AccountServiceTests(unittest.TestCase):
         for kwargs, message in (
             ({"username": "ab", "password": "long-enough-1"}, "用户名须为 3–32 位小写字母、数字或下划线"),
             ({"username": "new_one", "password": "short"}, "密码长度须为 8–128 位"),
-            ({"username": "new_one", "password": "new_one"}, "密码不能与用户名相同"),
+            ({"username": "new_one_1", "password": "new_one_1"}, "密码不能与用户名相同"),
             ({"username": "OWNER", "password": "long-enough-1"}, "用户名或邮箱已被使用"),
             ({"username": "new_one", "password": "long-enough-1", "email": "owner@example.com"}, "用户名或邮箱已被使用"),
             ({"username": "new_one", "password": "long-enough-1", "email": "not-an-email"}, "邮箱格式不正确"),
