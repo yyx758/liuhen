@@ -132,7 +132,7 @@
 
 - 需要输入旧密码和新密码；新密码规则同注册。
 - 成功后吊销该用户**其他**会话，当前会话保留；清除 `must_change_password`。
-- 强制改密状态下（管理员重置后首次登录），除 `GET /auth/me`、`POST /auth/password`、`POST /auth/logout` 外，其余接口返回 403 `password_change_required`。
+- 强制改密状态下（管理员重置后首次登录），除 `GET /auth/me`、`POST /auth/password`、`POST /auth/logout` 外，其余接口返回 403。
 
 ### 5.5 忘记密码
 
