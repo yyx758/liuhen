@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api'
-import { auth, logout } from './auth'
+import { auth, logout, refreshPendingUsers } from './auth'
 import { PASSWORD_PATH } from './router'
 import { displayDate, taskDate, taskTime } from './format'
 import { refresh, runAction, state } from './state'
@@ -31,7 +31,8 @@ watch(
   ([userId, mustChange, bare]) => { if (userId && !mustChange && !bare) void refresh() },
   { immediate: true },
 )
-watch(() => route.fullPath, () => { menuOpen.value = false })
+watch(() => route.fullPath, () => { menuOpen.value = false; void refreshPendingUsers() }, { immediate: true })
+watch(() => auth.user?.role, () => { void refreshPendingUsers() })
 function closeMenu(event: MouseEvent) {
   if (!(event.target as HTMLElement).closest('.user-menu')) menuOpen.value = false
 }
@@ -69,11 +70,13 @@ async function deleteTask(id: number, version: number) {
       <RouterLink to="/" class="brand" aria-label="小记首页"><span class="brand-mark"><Icon name="spark" :size="13" /></span>小记<span class="brand-period">.</span></RouterLink>
       <nav class="nav" aria-label="主导航">
         <RouterLink v-for="[path, label] in nav" :key="path" :to="path" active-class="active">{{ label }}<span v-if="path === '/history' && pendingCount" class="count">{{ pendingCount }}</span></RouterLink>
+        <template v-if="auth.user?.role === 'admin'"><span class="nav-sep" aria-hidden="true"></span><RouterLink to="/admin" active-class="active">管理<span v-if="auth.pendingUsers" class="count" title="待审核账号">{{ auth.pendingUsers }}</span></RouterLink></template>
       </nav>
       <div class="top-actions"><button class="top-new" type="button" @click="state.editorTaskId = null; state.editorOpen = true"><Icon name="plus" :size="15" />记一笔</button><div class="user-menu">
           <button class="avatar" type="button" aria-haspopup="menu" :aria-expanded="menuOpen" :aria-label="`账号菜单：${auth.user?.username ?? ''}`" @click="menuOpen = !menuOpen">{{ auth.user?.username.slice(0, 1).toUpperCase() }}</button>
           <div v-if="menuOpen" class="user-menu-panel" role="menu">
             <div class="user-menu-who"><b>{{ auth.user?.username }}</b>{{ auth.user?.role === 'admin' ? '管理员' : '普通用户' }}</div>
+            <RouterLink to="/account" role="menuitem">个人设置</RouterLink>
             <RouterLink :to="PASSWORD_PATH" role="menuitem">修改密码</RouterLink>
             <button type="button" role="menuitem" @click="signOut">退出登录</button>
           </div>

@@ -76,7 +76,56 @@ export type CurrentUser = {
   email: string | null
   role: 'user' | 'admin'
   must_change_password: boolean
+  created_at: string
 }
+
+export type UserStatus = 'pending' | 'active' | 'rejected' | 'disabled'
+
+export type LoginSession = {
+  id: number
+  created_at: string
+  last_seen_at: string
+  ip: string | null
+  user_agent: string | null
+  current: boolean
+}
+
+export type OwnEvent = { id: number; event_type: string; ip: string | null; created_at: string }
+
+export type AdminUser = {
+  id: number
+  username: string
+  email: string | null
+  role: 'user' | 'admin'
+  status: UserStatus
+  must_change_password: boolean
+  created_at: string
+  last_login_at: string | null
+  reviewed_at: string | null
+  status_reason: string | null
+}
+
+export type AdminUserPage = {
+  items: AdminUser[]
+  total: number
+  page: number
+  page_size: number
+  counts: Record<UserStatus | 'all', number>
+}
+
+export type AccountEvent = {
+  id: number
+  event_type: string
+  target_user_id: number
+  actor_user_id: number | null
+  target_username: string | null
+  actor_username: string | null
+  reason: string | null
+  details: Record<string, unknown> | null
+  created_at: string
+}
+
+export type AccountEventGroup = 'all' | 'review' | 'account' | 'login'
 
 const BASE = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -127,6 +176,40 @@ export const api = {
     method: 'POST', body: JSON.stringify({ account, password, remember }), handleAuthError: false,
   }),
   logout: () => request<void>('/auth/logout', { method: 'POST', handleAuthError: false }),
+  register: (username: string, password: string, email: string | null) => request<{ username: string; status: UserStatus }>('/auth/register', {
+    method: 'POST', body: JSON.stringify({ username, password, email }), handleAuthError: false,
+  }),
+  changeEmail: (email: string | null, currentPassword: string) => request<CurrentUser>('/auth/me', {
+    method: 'PATCH', body: JSON.stringify({ email, current_password: currentPassword }),
+  }),
+  sessions: () => request<LoginSession[]>('/auth/sessions'),
+  revokeSession: (id: number) => request<void>(`/auth/sessions/${id}`, { method: 'DELETE' }),
+  revokeOtherSessions: () => request<{ revoked: number }>('/auth/sessions/revoke-others', { method: 'POST' }),
+  ownEvents: () => request<OwnEvent[]>('/auth/events'),
+  adminUsers: (status: UserStatus | 'all', q: string, page = 1, pageSize = 100) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+    if (status !== 'all') params.set('status', status)
+    if (q.trim()) params.set('q', q.trim())
+    return request<AdminUserPage>(`/admin/users?${params}`)
+  },
+  adminUser: (id: number) => request<AdminUser>(`/admin/users/${id}`),
+  pendingUserCount: () => request<{ count: number }>('/admin/users/pending-count'),
+  approveUser: (id: number) => request<AdminUser>(`/admin/users/${id}/approve`, { method: 'POST' }),
+  rejectUser: (id: number, reason: string) => request<AdminUser>(`/admin/users/${id}/reject`, {
+    method: 'POST', body: JSON.stringify({ reason: reason || null }),
+  }),
+  disableUser: (id: number, reason: string) => request<AdminUser>(`/admin/users/${id}/disable`, {
+    method: 'POST', body: JSON.stringify({ reason: reason || null }),
+  }),
+  enableUser: (id: number) => request<AdminUser>(`/admin/users/${id}/enable`, { method: 'POST' }),
+  resetUserPassword: (id: number) => request<{ temporary_password: string }>(`/admin/users/${id}/reset-password`, { method: 'POST' }),
+  deleteUser: (id: number) => request<void>(`/admin/users/${id}`, { method: 'DELETE' }),
+  accountEvents: ({ userId, group = 'all', beforeId, limit = 50 }: { userId?: number; group?: AccountEventGroup; beforeId?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams({ group, limit: String(limit) })
+    if (userId !== undefined) params.set('user_id', String(userId))
+    if (beforeId !== undefined) params.set('before_id', String(beforeId))
+    return request<AccountEvent[]>(`/admin/account-events?${params}`)
+  },
   changePassword: (oldPassword: string, newPassword: string) => request<void>('/auth/password', {
     method: 'POST', body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }), handleAuthError: false,
   }),

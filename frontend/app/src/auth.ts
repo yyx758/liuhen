@@ -6,7 +6,15 @@ import { clearUserData, useUserData } from './state'
 export const auth = reactive({
   user: null as CurrentUser | null,
   checked: false,
+  /** 待审核账号数（只对管理员有意义），用于导航角标。 */
+  pendingUsers: 0,
 })
+
+/** 刷新待审核角标；打开页面、切换页面和审核操作后调用，不做实时推送（D15）。 */
+export async function refreshPendingUsers() {
+  if (auth.user?.role !== 'admin' || auth.user.must_change_password) { auth.pendingUsers = 0; return }
+  try { auth.pendingUsers = (await api.pendingUserCount()).count } catch { /* 角标失败不影响页面 */ }
+}
 
 /** 更新当前用户；换了人（包括登出）时清空上一个用户的数据。 */
 export function setUser(user: CurrentUser | null) {

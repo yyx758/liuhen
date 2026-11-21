@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { login, safeRedirect } from '../auth'
 
 const route = useRoute()
@@ -34,7 +34,7 @@ async function submit() {
     <div class="login-shell">
       <header class="login-header">
         <span class="login-brand">小记</span>
-        <span class="login-register">还没有账号？<button type="button" @click="notice = '注册功能即将开放，请先联系管理员开通账号。'">注册</button></span>
+        <span class="login-register">还没有账号？<RouterLink to="/register" class="login-link">注册</RouterLink></span>
       </header>
 
       <section class="login-content" aria-labelledby="login-title">
