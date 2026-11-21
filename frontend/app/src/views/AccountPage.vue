@@ -80,6 +80,7 @@ async function confirmDialog() {
         </dd>
         <dt>角色</dt><dd>{{ auth.user?.role === 'admin' ? '管理员' : '普通用户' }}</dd>
         <dt>注册时间</dt><dd>{{ auth.user ? stamp(auth.user.created_at) : '' }}</dd>
+        <dt>今日对话</dt><dd v-if="auth.user?.chat_usage">{{ auth.user.chat_usage.limit === null ? `${auth.user.chat_usage.today} 轮 · 不限量` : `${auth.user.chat_usage.today} / ${auth.user.chat_usage.limit} 轮` }}<span class="tiny">　每天 0 点（UTC+8）重新计数</span></dd><dd v-else>—</dd>
         <dt>密码</dt><dd><RouterLink :to="PASSWORD_PATH" class="acc-link">修改密码</RouterLink><span class="tiny">　修改后其他设备会全部下线</span></dd>
       </dl>
     </section>

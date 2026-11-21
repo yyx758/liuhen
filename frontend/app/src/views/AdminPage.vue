@@ -6,7 +6,7 @@ import { ACCOUNT_EVENT_LABELS, ago, stamp } from '../format'
 import { state } from '../state'
 import Icon from '../components/Icon.vue'
 
-// 交互以 frontend/reference/admin.html 原型为准；每日对话用量与上限在 P5 接入。
+// 交互以 frontend/reference/admin.html 原型为准。
 type Tab = UserStatus | 'all'
 const TABS: [Tab, string][] = [['pending', '待审核'], ['active', '正常'], ['disabled', '已停用'], ['rejected', '已拒绝'], ['all', '全部']]
 const STATUS: Record<UserStatus, [string, string]> = { pending: ['待审核', 'yellow'], active: ['正常', 'green'], disabled: ['已停用', 'red'], rejected: ['已拒绝', ''] }
@@ -35,10 +35,30 @@ type Modal =
   | { type: 'reject' | 'disable'; user: AdminUser; reason: string }
   | { type: 'reset'; user: AdminUser; password: string; copied: boolean }
   | { type: 'delete'; user: AdminUser; confirm: string }
+  | { type: 'limit'; user: AdminUser; useDefault: boolean; value: string }
 const modal = ref<Modal | null>(null)
 const modalError = ref('')
 
 const counts = computed(() => page.value?.counts ?? { pending: 0, active: 0, disabled: 0, rejected: 0, all: 0 })
+const defaultLimit = computed(() => page.value?.default_chat_limit ?? 50)
+const hasUsage = (user: AdminUser) => user.status === 'active' || user.status === 'disabled'
+function usagePercent(user: AdminUser) {
+  return user.chat_limit === null ? 0 : Math.min(100, (user.chat_today / user.chat_limit) * 100)
+}
+function limitText(limit: unknown) {
+  return limit === null || limit === undefined ? `默认(${defaultLimit.value})` : String(limit)
+}
+const limitValid = computed(() => {
+  const current = modal.value
+  if (current?.type !== 'limit' || current.useDefault) return true
+  const value = Number(current.value)
+  return Number.isInteger(value) && value >= 1 && value <= 1000
+})
+function dayLabel(index: number) {
+  if (index === 6) return '今天'
+  const date = new Date(state.clockNow - (6 - index) * 864e5)
+  return `周${'日一二三四五六'[date.getDay()]}`
+}
 const selfId = computed(() => auth.user?.id)
 
 // 切换筛选或搜索很快时，只采用最后一次请求的结果，避免先发后到的响应覆盖新结果。
@@ -119,6 +139,7 @@ function eventDetail(event: AccountEvent) {
   const details = event.details ?? {}
   if (event.event_type === 'email_changed') return `${details.from ?? '无'} → ${details.to ?? '无'}`
   if (event.event_type === 'role_changed') return `${details.from} → ${details.to}`
+  if (event.event_type === 'chat_limit_changed') return `${limitText(details.from)} → ${limitText(details.to)}`
   return ''
 }
 
@@ -177,6 +198,11 @@ async function confirmModal() {
     if (ok) modal.value = null
   } else if (current.type === 'reset') {
     await run('modal', async () => { current.password = (await api.resetUserPassword(user.id)).temporary_password }, `已重置 ${user.username} 的密码。`)
+  } else if (current.type === 'limit') {
+    if (!limitValid.value) return
+    const limit = current.useDefault ? null : Number(current.value)
+    const ok = await run('modal', () => api.setChatLimit(user.id, limit), `${user.username} 的每日上限已改为 ${limit ?? defaultLimit.value} 轮。`)
+    if (ok) modal.value = null
   } else if (current.type === 'delete' && current.confirm === user.username) {
     const ok = await run(`delete:${user.id}`, () => api.deleteUser(user.id), `已删除 ${user.username}，用户名已释放。`)
     if (ok) modal.value = null
@@ -196,14 +222,14 @@ async function copyPassword() {
       <div>
         <div class="page-kicker"><span class="dot"></span>管理 · 仅管理员可见</div>
         <h1 class="page-title">账号管理</h1>
-        <p class="lead">审核注册、停用账号和重置密码。你看不到其他人的待办和对话内容。</p>
+        <p class="lead">审核注册、停用账号、重置密码和调整每日对话上限。你看不到其他人的待办和对话内容。</p>
       </div>
     </section>
     <div class="adm-stats">
       <button type="button" class="adm-stat" :class="{ hl: counts.pending }" @click="jump('pending')"><div class="tiny">待审核</div><div class="num">{{ counts.pending }}<small>个</small></div></button>
       <button type="button" class="adm-stat" @click="jump('active')"><div class="tiny">正常账号</div><div class="num">{{ counts.active }}<small>个</small></div></button>
-      <button type="button" class="adm-stat" @click="jump('disabled')"><div class="tiny">已停用</div><div class="num">{{ counts.disabled }}<small>个</small></div></button>
-      <button type="button" class="adm-stat" @click="jump('all')"><div class="tiny">全部账号</div><div class="num">{{ counts.all }}<small>个</small></div></button>
+      <div class="adm-stat"><div class="tiny">今日对话（全部用户）</div><div class="num">{{ page?.chat_today ?? '—' }}<small>轮</small></div></div>
+      <div class="adm-stat"><div class="tiny">近 7 天对话</div><div class="num">{{ page?.chat_week ?? '—' }}<small>轮</small></div></div>
     </div>
 
     <div class="adm-subnav" role="tablist">
@@ -222,7 +248,7 @@ async function copyPassword() {
         <label class="adm-search"><Icon name="search" :size="15" /><input v-model="q" placeholder="搜索用户名或邮箱" aria-label="搜索账号" maxlength="100" /></label>
       </div>
       <div class="adm-list">
-        <div class="adm-row head"><div>账号</div><div class="c-status">状态</div><div class="c-when">{{ tab === 'pending' ? '注册' : '活动' }}</div><div style="text-align:right">操作</div></div>
+        <div class="adm-row head"><div>账号</div><div class="c-status">状态</div><div class="c-when">{{ tab === 'pending' ? '注册' : '活动' }}</div><div class="c-usage">今日对话</div><div class="c-week">近 7 天</div><div style="text-align:right">操作</div></div>
         <div v-for="user in page?.items ?? []" :key="user.id" class="adm-row item" tabindex="0" role="button" :aria-label="`查看 ${user.username}`" @click="openDrawer(user)" @keydown.enter.self="openDrawer(user)">
           <div class="adm-acct">
             <span class="av" :class="{ admin: user.role === 'admin' }">{{ user.username[0].toUpperCase() }}</span>
@@ -236,6 +262,14 @@ async function copyPassword() {
             <template v-if="user.status === 'pending'"><b>{{ ago(user.created_at, state.clockNow) }}</b>注册<br>{{ waitText(user.created_at) }}</template>
             <template v-else>最近登录 <b>{{ ago(user.last_login_at, state.clockNow) }}</b><br>注册于 {{ ago(user.created_at, state.clockNow) }}</template>
           </div>
+          <div class="c-usage">
+            <span v-if="!hasUsage(user)" class="tiny">—</span>
+            <div v-else class="adm-usage">
+              <div class="t"><b>{{ user.chat_limit === null ? `${user.chat_today} 轮` : `${user.chat_today} / ${user.chat_limit}` }}</b><span class="tiny">{{ user.chat_limit === null ? '不限' : user.daily_chat_limit === null ? '默认' : '自定义' }}</span></div>
+              <div class="adm-bar"><i :class="{ warn: usagePercent(user) >= 80, full: usagePercent(user) >= 100 }" :style="{ width: `${usagePercent(user)}%` }"></i></div>
+            </div>
+          </div>
+          <div class="c-week"><span class="small">{{ hasUsage(user) ? `${user.chat_week} 轮` : '—' }}</span></div>
           <div class="adm-ops" @click.stop>
             <span v-if="user.id === selfId" class="tiny">这是你</span>
             <template v-else-if="user.status === 'pending'">
@@ -244,6 +278,7 @@ async function copyPassword() {
             </template>
             <template v-else-if="user.status === 'active'">
               <button class="text-btn" type="button" :disabled="!!busy" @click="openModal({ type: 'reset', user, password: '', copied: false })">重置密码</button>
+              <button v-if="user.role !== 'admin'" class="text-btn" type="button" :disabled="!!busy" @click="openModal({ type: 'limit', user, useDefault: user.daily_chat_limit === null, value: String(user.daily_chat_limit ?? defaultLimit) })">调整上限</button>
               <button class="outline danger-outline" type="button" :disabled="!!busy" @click="openModal({ type: 'disable', user, reason: '' })">停用</button>
             </template>
             <template v-else-if="user.status === 'disabled'">
@@ -300,7 +335,16 @@ async function copyPassword() {
           <dt>注册时间</dt><dd>{{ stamp(drawerUser.created_at) }}（{{ ago(drawerUser.created_at, state.clockNow) }}）</dd>
           <dt>最近登录</dt><dd>{{ drawerUser.last_login_at ? `${stamp(drawerUser.last_login_at)}（${ago(drawerUser.last_login_at, state.clockNow)}）` : '从未登录' }}</dd>
           <dt v-if="drawerUser.reviewed_at">审核时间</dt><dd v-if="drawerUser.reviewed_at">{{ stamp(drawerUser.reviewed_at) }}</dd>
+          <dt>每日上限</dt><dd>{{ drawerUser.chat_limit === null ? '不限（管理员）' : `${drawerUser.chat_limit} 轮` }}<span v-if="drawerUser.chat_limit !== null" class="tiny">（{{ drawerUser.daily_chat_limit === null ? '默认' : '自定义' }}）</span></dd>
         </dl>
+        <div v-if="hasUsage(drawerUser) && drawerUser.chat_days" class="adm-dsec">
+          <h3>近 7 天对话 <span class="tiny">合计 {{ drawerUser.chat_week }} 轮</span></h3>
+          <div class="adm-week">
+            <div v-for="(count, index) in drawerUser.chat_days" :key="index" class="c" :class="{ today: index === 6 }">
+              <em>{{ count || '' }}</em><i :style="{ height: `${Math.max(2, (count / Math.max(1, ...drawerUser.chat_days)) * 64)}px` }"></i><span>{{ dayLabel(index) }}</span>
+            </div>
+          </div>
+        </div>
         <div class="adm-dsec">
           <h3>账号事件 <button class="text-btn" type="button" @click="drawerUser = null; section = 'events'; eventGroup = 'all'">查看全部</button></h3>
           <div class="adm-timeline">
@@ -320,6 +364,7 @@ async function copyPassword() {
           </template>
           <template v-else-if="drawerUser.status === 'active'">
             <button class="text-btn" type="button" :disabled="!!busy" @click="openModal({ type: 'reset', user: drawerUser, password: '', copied: false })">重置密码</button>
+            <button v-if="drawerUser.role !== 'admin'" class="text-btn" type="button" :disabled="!!busy" @click="openModal({ type: 'limit', user: drawerUser, useDefault: drawerUser.daily_chat_limit === null, value: String(drawerUser.daily_chat_limit ?? defaultLimit) })">调整上限</button>
             <button class="outline danger-outline" type="button" :disabled="!!busy" @click="openModal({ type: 'disable', user: drawerUser, reason: '' })">停用</button>
           </template>
           <template v-else-if="drawerUser.status === 'disabled'">
@@ -361,6 +406,24 @@ async function copyPassword() {
           <p class="adm-desc">把下面的密码告诉 <b>{{ modal.user.username }}</b>。<b>关闭后无法再次查看</b>，忘记了只能重新重置。</p>
           <div class="adm-pw"><span>{{ modal.password }}</span><button type="button" @click="copyPassword">{{ modal.copied ? '已复制' : '复制' }}</button></div>
           <div class="modal-actions"><button class="solid" type="button" @click="closeModal">{{ modal.copied ? '完成' : '我已记下' }}</button></div>
+        </template>
+        <template v-else-if="modal.type === 'limit'">
+          <h2 id="adm-modal-title" class="adm-modal-title">调整每日对话上限：{{ modal.user.username }}</h2>
+          <p class="adm-desc">今天已用 {{ modal.user.chat_today }} 轮，近 7 天合计 {{ modal.user.chat_week }} 轮。修改后立即生效，次日 0 点（UTC+8）重新计数。</p>
+          <label class="adm-radio"><input v-model="modal.useDefault" type="radio" :value="true" name="adm-limit" />使用默认值（{{ defaultLimit }} 轮/天）</label>
+          <label class="adm-radio"><input v-model="modal.useDefault" type="radio" :value="false" name="adm-limit" />自定义</label>
+          <div class="adm-limit-input" :class="{ off: modal.useDefault }">
+            <input v-model="modal.value" class="field" type="number" min="1" max="1000" :disabled="modal.useDefault" aria-label="每日上限" /><span class="small">轮/天</span>
+          </div>
+          <div class="adm-chips adm-limit-chips">
+            <button v-for="n in [20, 50, 100, 200]" :key="n" type="button" :class="{ on: !modal.useDefault && Number(modal.value) === n }" :disabled="modal.useDefault" @click="modal.value = String(n)">{{ n }}</button>
+          </div>
+          <div v-if="!modal.useDefault && modal.value !== '' && Number(modal.value) < modal.user.chat_today" class="adm-note">新上限低于今天已用的 {{ modal.user.chat_today }} 轮，对方今天将无法继续对话。</div>
+          <p v-if="modalError" class="adm-note red" role="alert">{{ modalError }}</p>
+          <div class="modal-actions">
+            <button class="outline" type="button" :disabled="!!busy" @click="closeModal">取消</button>
+            <button class="solid" type="button" :disabled="!!busy || !limitValid" @click="confirmModal"><span v-if="busy" class="adm-spin"></span>保存</button>
+          </div>
         </template>
         <template v-else-if="modal.type === 'delete'">
           <h2 id="adm-modal-title" class="adm-modal-title">删除注册申请：{{ modal.user.username }}</h2>

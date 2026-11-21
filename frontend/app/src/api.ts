@@ -77,6 +77,8 @@ export type CurrentUser = {
   role: 'user' | 'admin'
   must_change_password: boolean
   created_at: string
+  /** 今日对话用量；limit 为 null 表示不限量（管理员）。 */
+  chat_usage?: { today: number; limit: number | null } | null
 }
 
 export type UserStatus = 'pending' | 'active' | 'rejected' | 'disabled'
@@ -103,6 +105,11 @@ export type AdminUser = {
   last_login_at: string | null
   reviewed_at: string | null
   status_reason: string | null
+  daily_chat_limit: number | null
+  chat_limit: number | null
+  chat_today: number
+  chat_week: number
+  chat_days?: number[] | null
 }
 
 export type AdminUserPage = {
@@ -111,6 +118,9 @@ export type AdminUserPage = {
   page: number
   page_size: number
   counts: Record<UserStatus | 'all', number>
+  chat_today: number
+  chat_week: number
+  default_chat_limit: number
 }
 
 export type AccountEvent = {
@@ -193,6 +203,9 @@ export const api = {
     return request<AdminUserPage>(`/admin/users?${params}`)
   },
   adminUser: (id: number) => request<AdminUser>(`/admin/users/${id}`),
+  setChatLimit: (id: number, limit: number | null) => request<AdminUser>(`/admin/users/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ daily_chat_limit: limit }),
+  }),
   pendingUserCount: () => request<{ count: number }>('/admin/users/pending-count'),
   approveUser: (id: number) => request<AdminUser>(`/admin/users/${id}/approve`, { method: 'POST' }),
   rejectUser: (id: number, reason: string) => request<AdminUser>(`/admin/users/${id}/reject`, {

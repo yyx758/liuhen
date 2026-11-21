@@ -10,6 +10,15 @@ export const auth = reactive({
   pendingUsers: 0,
 })
 
+/** 发送对话后刷新今日用量（不影响其他用户状态）。 */
+export async function refreshUsage() {
+  if (!auth.user) return
+  try {
+    const user = await api.me()
+    if (auth.user?.id === user.id) auth.user.chat_usage = user.chat_usage
+  } catch { /* 用量刷新失败不影响对话 */ }
+}
+
 /** 刷新待审核角标；打开页面、切换页面和审核操作后调用，不做实时推送（D15）。 */
 export async function refreshPendingUsers() {
   if (auth.user?.role !== 'admin' || auth.user.must_change_password) { auth.pendingUsers = 0; return }

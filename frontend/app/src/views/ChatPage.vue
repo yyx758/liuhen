@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { api, type Action } from '../api'
+import { auth, refreshUsage } from '../auth'
 import { proposalChanges } from '../format'
 import { renderMarkdown } from '../markdown'
 import { activeChat, newChat, refresh, saveChats, sendChat, state, type ChatMessage, type LocalChat } from '../state'
@@ -37,7 +38,17 @@ async function submit() {
   if (!text || state.busy) return
   input.value = ''
   await sendChat(text)
+  void refreshUsage()
 }
+const usageText = computed(() => {
+  const usage = auth.user?.chat_usage
+  if (!usage) return ''
+  return usage.limit === null ? `今日已用 ${usage.today} 轮 · 不限量` : `今日已用 ${usage.today} / ${usage.limit} 轮`
+})
+const usageFull = computed(() => {
+  const usage = auth.user?.chat_usage
+  return Boolean(usage && usage.limit !== null && usage.today >= usage.limit)
+})
 function openChat(id: string) { state.activeChatId = id; saveChats() }
 async function removeChat(item: LocalChat) {
   if (state.busy || !window.confirm(`删除「${item.title}」的会话记录？任务和操作留痕会保留。`)) return
@@ -53,7 +64,7 @@ async function removeChat(item: LocalChat) {
   } catch (error) { state.error = error instanceof Error ? error.message : '删除会话失败' }
   finally { state.busy = false }
 }
-async function retry(message: ChatMessage) { if (!state.busy) await sendChat(message.text, message) }
+async function retry(message: ChatMessage) { if (!state.busy) { await sendChat(message.text, message); void refreshUsage() } }
 async function decide(id: number, decision: 'confirm' | 'cancel') {
   state.busy = true
   state.error = ''
@@ -72,6 +83,6 @@ async function decide(id: number, decision: 'confirm' | 'cancel') {
       <section class="chat-main"><div class="chat-bar"><span>{{ chat.title }}</span><div style="display:flex;align-items:center;gap:12px"><span class="chat-badge">AI 对话</span><button class="chat-mobile-delete" type="button" :disabled="state.busy" aria-label="删除当前会话" @click="removeChat(chat)"><Icon name="trash" :size="16" /></button></div></div><div ref="scroll" class="chat-messages"><div v-if="!chat.messages.length" class="empty-state" style="margin:auto"><div class="empty-symbol"><Icon name="message" :size="23" /></div><h3>想到什么，就告诉小记</h3><p>试着输入“明天下午三点提醒我复习 Redis”</p></div>
         <div v-for="(message, index) in chat.messages" :key="index" class="chat-msg" :class="{ user: message.role === 'user' }"><span class="msg-avatar">{{ message.role === 'user' ? '我' : '✳' }}</span><div class="message-body"><div class="message-name">{{ message.role === 'user' ? '你' : '小记' }}</div><div v-if="message.role === 'assistant'" class="bubble markdown-content" v-html="renderMarkdown(message.text)" /><div v-else class="bubble">{{ message.text }}</div><button v-if="message.failed" class="subtle-link retry-link" type="button" :disabled="state.busy" @click="retry(message)">发送失败，使用原请求重试</button><div v-for="action in pendingFor(message)" :key="action.id" class="suggestion"><div class="diff-title">{{ action.action_type === 'delete' ? '删除提案' : '修改提案' }} · #{{ action.id }}</div><b>{{ action.before.title }}</b><div v-for="change in proposalChanges(action)" :key="change.label" class="proposal-change"><div class="tiny">{{ change.label }}</div><div class="diff-columns"><div class="diff-col"><span class="tiny">修改前</span><b>{{ change.before }}</b></div><span class="diff-arrow">→</span><div class="diff-col new"><span class="tiny">修改后</span><b>{{ change.after }}</b></div></div></div><div v-if="action.status === 'pending'" class="diff-actions"><button class="solid" type="button" :disabled="state.busy" @click="decide(action.id, 'confirm')">确认执行</button><button class="outline" type="button" :disabled="state.busy" @click="decide(action.id, 'cancel')">取消</button></div><span v-else class="tiny">{{ action.status }}</span></div></div></div>
         <div v-if="state.busy" class="chat-msg"><span class="msg-avatar">✳</span><div class="bubble">正在处理…</div></div>
-      </div><div class="chat-compose"><form class="chat-input-wrap" @submit.prevent="submit"><textarea v-model="input" rows="2" placeholder="输入你想安排的事情…" aria-label="输入消息" @keydown.enter.exact.prevent="submit" /><button class="chat-send" type="submit" :disabled="state.busy || !input.trim()" aria-label="发送消息"><Icon name="up" :size="17" /></button></form><div class="chat-hint">Enter 发送 · Shift + Enter 换行 · 修改和删除需你确认</div></div></section></div>
+      </div><div class="chat-compose"><form class="chat-input-wrap" @submit.prevent="submit"><textarea v-model="input" rows="2" placeholder="输入你想安排的事情…" aria-label="输入消息" @keydown.enter.exact.prevent="submit" /><button class="chat-send" type="submit" :disabled="state.busy || !input.trim()" aria-label="发送消息"><Icon name="up" :size="17" /></button></form><div class="chat-hint">Enter 发送 · Shift + Enter 换行 · 修改和删除需你确认<span v-if="usageText" class="chat-usage" :class="{ full: usageFull }"> · {{ usageFull ? '今日对话次数已用完，明天再来' : usageText }}</span></div></div></section></div>
   </main>
 </template>
