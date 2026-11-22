@@ -45,6 +45,9 @@ class TaskORM(Base):
         default=1
     )
 
+    # 提前多少分钟提醒；为空表示不提醒，0 表示准时。基准时间是 start_at，没有时用 due_at。
+    remind_before_minutes: Mapped[int | None] = mapped_column(nullable=True)
+
     __table_args__ = (
         CheckConstraint(
             "end_at IS NULL OR (start_at IS NOT NULL AND end_at > start_at)",
@@ -58,4 +61,5 @@ class TaskORM(Base):
             name="ex_tasks_no_overlap",
         ),
         Index("ix_tasks_user_id_id", "user_id", "id"),
+        CheckConstraint("remind_before_minutes BETWEEN 0 AND 10080", name="ck_tasks_remind_before_minutes"),
     )

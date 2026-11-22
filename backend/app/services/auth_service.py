@@ -42,6 +42,7 @@ class CurrentUser:
     username: str
     email: str | None
     email_verified: bool
+    email_reminders: bool
     role: str
     must_change_password: bool
     created_at: datetime
@@ -107,6 +108,7 @@ def find_user_by_account(session: Session, account: str) -> UserORM | None:
 def _to_current(user: UserORM, session_id: int) -> CurrentUser:
     return CurrentUser(
         id=user.id, username=user.username, email=user.email, email_verified=user.email_verified_at is not None,
+        email_reminders=user.email_reminders,
         role=user.role, must_change_password=user.must_change_password, created_at=user.created_at,
         daily_chat_limit=user.daily_chat_limit, session_id=session_id,
     )
@@ -252,6 +254,15 @@ def change_password(
             session, event_type="password_changed", target_user_id=user_id, actor_user_id=user_id,
             details={"revoked_sessions": revoked},
         )
+
+
+def set_preferences(session: Session, *, user_id: int, email_reminders: bool) -> None:
+    """个人设置里的提醒偏好；目前只有"邮件提醒"开关（提醒 PRD R11）。"""
+    with session.begin():
+        user = session.get(UserORM, user_id, with_for_update=True)
+        if user is None:
+            raise HTTPException(404, "用户不存在")
+        user.email_reminders = email_reminders
 
 
 def require_email(email: str | None) -> str:

@@ -31,6 +31,8 @@ class UserORM(Base):
     # 所以这个自引用外键不会挡住删除。
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", name="fk_users_reviewed_by"), nullable=True)
+    # 是否接收提醒邮件；邮箱未验证时无论开关都不发。
+    email_reminders: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     # 每日对话轮数上限；为空时使用配置的默认值。管理员不受限制，也不设置这个值。
     daily_chat_limit: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

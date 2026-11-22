@@ -88,6 +88,7 @@ def update_if_version(
                 if after.end_at is not None else None
             ),
             status=after.status,
+            remind_before_minutes=after.remind_before_minutes,
             version=expected_version + 1
         )
         .execution_options(synchronize_session=False)

@@ -332,3 +332,52 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReminderToolTests(unittest.TestCase):
+    """提醒 PRD R12：创建时可设提醒；修改提醒是独立的一组提案，提案展示用人能读懂的说法。"""
+
+    def setUp(self) -> None:
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
+        self.registry = ToolRegistry()
+
+    def tearDown(self) -> None:
+        self.database.__exit__(None, None, None)
+
+    def run_tool(self, name: str, arguments: dict):
+        with Session(self.engine) as session:
+            return json.loads(self.registry.execute_tool(
+                name, json.dumps(arguments, ensure_ascii=False), session, user_id=self.user_id,
+            ))
+
+    def test_create_with_reminder_and_separate_reminder_proposal(self) -> None:
+        created = self.run_tool("create_task", {
+            "title": "开组会", "start_at": "2030-01-02T10:00:00+08:00", "remind_before_minutes": 30,
+        })
+        self.assertEqual(created["remind_before_minutes"], 30)
+
+        proposals = self.run_tool("propose_update", {
+            "task_id": created["id"], "changes": {"title": "开周会", "remind_before_minutes": 60},
+        })
+        # 改标题和改提醒是两项独立修改，分别确认。
+        self.assertEqual(len(proposals), 2)
+        reminder = next(p for p in proposals if p["after"]["remind_before_minutes"] == 60)
+        self.assertEqual(reminder["after"]["title"], "开组会")
+        reply = self.registry.terminal_reply("propose_update", json.dumps(proposals, ensure_ascii=False))
+        self.assertIn("提醒：提前 30 分钟 → 提前 1 小时", reply)
+
+        cancel = self.run_tool("propose_update", {
+            "task_id": created["id"], "changes": {"remind_before_minutes": None},
+        })
+        reply = self.registry.terminal_reply("propose_update", json.dumps(cancel, ensure_ascii=False))
+        self.assertIn("提醒：提前 30 分钟 → 不提醒", reply)
+
+    def test_reminder_labels(self) -> None:
+        from backend.app.agent.tool_registry import format_reminder
+
+        self.assertEqual(
+            [format_reminder(v) for v in (None, 0, 15, 60, 120, 1440, 90)],
+            ["不提醒", "准时提醒", "提前 15 分钟", "提前 1 小时", "提前 2 小时", "提前 1 天", "提前 90 分钟"],
+        )

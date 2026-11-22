@@ -13,7 +13,7 @@ from backend.app.models.request import TaskCreateRequestORM
 from backend.app.schemas.task import TaskCreate, TaskRead, TaskUpdate
 from backend.app.repositories import action_repository, task_repository
 from backend.app.config.settings import USER_TIMEZONE
-from backend.app.services import audit_service
+from backend.app.services import audit_service, reminder_service
 
 
 # 将数据库实体转换为响应 DTO
@@ -42,7 +42,8 @@ def to_task_read(task: TaskORM) -> TaskRead:
         duration_minutes=duration_minutes,
         due_at=from_db_utc(task.due_at),
         status=task.status,
-        version=task.version
+        version=task.version,
+        remind_before_minutes=task.remind_before_minutes,
     )
 
 
@@ -111,7 +112,8 @@ def _create_task(
             priority=data.priority,
             due_at=to_db_utc(data.due_at) if data.due_at is not None else None,
             start_at=start_at,
-            end_at=end_at
+            end_at=end_at,
+            remind_before_minutes=data.remind_before_minutes,
         )
 
         # 调用 Repository 保存
@@ -119,6 +121,7 @@ def _create_task(
 
         # ORM 转响应 DTO
         result = to_task_read(task)
+        reminder_service.sync_task_reminder(session, result, previous=None, user_id=user_id)
         audit_service.record_event(
             session, "task_created", task.id, user_id=user_id,
             details={"task": result.model_dump(mode="json")},
@@ -210,6 +213,7 @@ def update_task(
                 raise HTTPException(409, f"时间与任务 {conflict.id} 冲突")
             if task_repository.update_if_version(session, task_id, expected_version, after) != 1:
                 raise HTTPException(409, "任务已变化，请刷新后重试")
+            reminder_service.sync_task_reminder(session, after, previous=before, user_id=user_id)
             _replace_pending_after_manual_change(session, task_id, "update", user_id=user_id)
             audit_service.record_event(
                 session, "task_updated", task_id, user_id=user_id,

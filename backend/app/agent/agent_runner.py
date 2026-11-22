@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -12,6 +12,12 @@ from backend.app.agent.llm import ask_llm
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.db.session import SessionLocal
 from backend.app.config.settings import USER_TIMEZONE, USER_TIMEZONE_NAME
+
+
+def upcoming_weekdays(local_now: datetime, days: int = 14) -> str:
+    """模型自行推算星期容易出错（测评中把周四说成周三），直接给出对照表。"""
+    dates = (local_now + timedelta(days=offset) for offset in range(days))
+    return "、".join(f"{day:%m-%d}星期{'一二三四五六日'[day.weekday()]}" for day in dates)
 
 
 def execute_one_tool(
@@ -58,7 +64,9 @@ async def run_agent_loop(
                 "你是留痕个人待办助手，只能调用提供给你的工具。"
                 f"当前本地时间为 {local_now.isoformat(timespec='minutes')}"
                 f"（星期{'一二三四五六日'[local_now.weekday()]}），"
-                f"用户时区为 {USER_TIMEZONE_NAME}。用户只需用自然语言说明时间，"
+                f"用户时区为 {USER_TIMEZONE_NAME}。"
+                f"今天起 14 天的日期与星期：{upcoming_weekdays(local_now)}；"
+                "回复中提到星期几时以此为准，不要自行推算。用户只需用自然语言说明时间，"
                 "不需要填写工具参数或时区。"
                 "创建任务时，把明确的相对时间换算为完整日期和时间；"
                 "创建任务至少需要开始时间或截止时间中的一个；两者都不明确时先追问，不猜测。"
@@ -67,6 +75,12 @@ async def run_agent_loop(
                 "未指定时长时保持为空，不推断结束时间；截止时间表示任务期限，"
                 "与开始时间和时长组成的日程安排独立，不互相推算或限制。"
                 "创建后按真实工具结果说明提供的时间。"
+                "提醒：用户说了提前多久提醒，就把 remind_before_minutes 设为对应分钟数；"
+                "用户说“提醒我……”并给出时间、但没说提前多久，设为 0（准时提醒）；"
+                "用户没有提到提醒，不要设置。提醒按开始时间计算，没有开始时间时按截止时间，"
+                "所以“提醒我做某事”的时间应作为开始时间或截止时间写入任务。"
+                "设置了提醒时，回复中说明提醒方式（如开始前 30 分钟提醒）；没有设置时不要提提醒。"
+                "修改或取消已有任务的提醒与其他字段一样，用 propose_update 生成提案。"
                 "用户问今天的未完成任务时，列出未完成且满足以下任一条件的任务："
                 "今天开始、今天截止、开始时间加时长形成的时间段与今天重叠（如跨午夜任务）；"
                 "并把截止时间已过仍未完成的逾期任务单独标出。"
@@ -76,7 +90,7 @@ async def run_agent_loop(
                 "用户要修改或删除时，先确认唯一目标；同名或指代含糊时用查询结果追问，"
                 "不得猜测任务 ID。propose_update 和 propose_delete 只生成待确认提案，"
                 "不会修改或删除任务。修改可涉及标题、优先级、开始时间、结束时间、"
-                "时长、截止时间和完成状态；用户说出的时间由你转换为完整本地日期时间。"
+                "时长、截止时间、完成状态和提醒；用户说出的时间由你转换为完整本地日期时间。"
                 "只改开始时间时保持原时长，只改时长时保持开始时间，只改结束时间时据此计算时长。"
                 "用户同时给出结束时间和时长时必须一致；时间或目标不明确就追问。"
                 "一条消息可能有多项独立要求，逐项完成，不要遗漏。"

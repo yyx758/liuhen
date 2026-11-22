@@ -2,7 +2,7 @@
 import type { Task } from '../api'
 import { state, runAction } from '../state'
 import { api } from '../api'
-import { displayDate, taskTime } from '../format'
+import { displayDate, reminderLabel, taskTime, willRemind } from '../format'
 import Icon from './Icon.vue'
 
 defineProps<{ task: Task; detailed?: boolean }>()
@@ -27,6 +27,7 @@ function toggle(task: Task) {
     </button>
     <div class="task-right">
       <span v-if="isAiTask(task)" class="tag ai">AI 安排</span>
+      <span v-if="willRemind(task, state.clockNow)" class="tag" :title="reminderLabel(task.remind_before_minutes)"><Icon name="bell" :size="11" />提醒</span>
       <span v-if="detailed" class="tag">其他</span>
       <span class="when">{{ taskTime(task) }}</span>
       <button class="quick-edit" type="button" :aria-label="`编辑${task.title}`" @click="state.editorTaskId = task.id; state.editorOpen = true"><Icon name="edit" :size="14" /></button>

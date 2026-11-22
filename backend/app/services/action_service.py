@@ -16,7 +16,7 @@ from backend.app.repositories import (
     task_repository
 )
 from backend.app.services.task_service import to_db_utc, to_task_read
-from backend.app.services import audit_service
+from backend.app.services import audit_service, reminder_service
 
 
 class ActionExecutionError(Exception):
@@ -128,7 +128,7 @@ def build_updated_snapshot(before: TaskRead, data: TaskUpdate) -> TaskRead:
 
 def rebase_batch_update(before: TaskRead, proposed: TaskRead, current: TaskRead) -> TaskRead:
     """Apply one independent change after another proposal from the same request."""
-    fields = ("title", "priority", "start_at", "duration_minutes", "due_at", "status")
+    fields = ("title", "priority", "start_at", "duration_minutes", "due_at", "status", "remind_before_minutes")
     changes = {
         field: getattr(proposed, field)
         for field in fields if getattr(before, field) != getattr(proposed, field)
@@ -515,6 +515,11 @@ def confirm_action(
                             affected = task_repository.update_if_version(
                                 session, action.task_id, expected_version, after
                             )
+                            if affected == 1:
+                                reminder_service.sync_task_reminder(
+                                    session, after, user_id=action.user_id,
+                                    previous=applied_before or TaskRead.model_validate(action.before_snapshot),
+                                )
                             if affected == 1 and applied_before is not None:
                                 action.before_snapshot = applied_before.model_dump(mode="json")
                                 action.after_snapshot = after.model_dump(mode="json")

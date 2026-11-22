@@ -47,6 +47,24 @@ async function load() {
 }
 onMounted(load)
 
+const savingReminders = ref(false)
+async function toggleEmailReminders(event: Event) {
+  const input = event.target as HTMLInputElement
+  const wanted = input.checked
+  savingReminders.value = true
+  try {
+    const user = await api.setPreferences(wanted)
+    if (auth.user) auth.user.email_reminders = user.email_reminders
+    state.toast = wanted ? '已开启邮件提醒。' : '已关闭邮件提醒，之后只在页面内提醒。'
+  } catch (error) {
+    // 保存失败时把开关拨回去，不显示未保存的状态。
+    input.checked = !wanted
+    state.error = error instanceof Error ? error.message : '保存失败，请稍后再试'
+  } finally {
+    savingReminders.value = false
+  }
+}
+
 function open(value: Dialog) { dialog.value = value; dialogError.value = ''; dialogInfo.value = '' }
 function close() { if (!busy.value) dialog.value = null }
 
@@ -104,6 +122,11 @@ async function confirmDialog() {
         <dt>注册时间</dt><dd>{{ auth.user ? stamp(auth.user.created_at) : '' }}</dd>
         <dt>今日对话</dt><dd v-if="auth.user?.chat_usage">{{ auth.user.chat_usage.limit === null ? `${auth.user.chat_usage.today} 轮 · 不限量` : `${auth.user.chat_usage.today} / ${auth.user.chat_usage.limit} 轮` }}<span class="tiny">　每天 0 点（UTC+8）重新计数</span></dd><dd v-else>—</dd>
         <dt>密码</dt><dd><RouterLink :to="PASSWORD_PATH" class="acc-link">修改密码</RouterLink><span class="tiny">　修改后其他设备会全部下线</span></dd>
+        <dt>邮件提醒</dt>
+        <dd>
+          <label class="acc-switch"><input type="checkbox" :checked="auth.user?.email_reminders" :disabled="savingReminders" @change="toggleEmailReminders" />{{ auth.user?.email_reminders ? '开启' : '关闭' }}</label>
+          <span class="tiny">{{ auth.user?.email_verified ? '　待办到点时同时发邮件；页面内提醒始终开启' : '　验证邮箱后才能收到提醒邮件' }}</span>
+        </dd>
       </dl>
     </section>
 

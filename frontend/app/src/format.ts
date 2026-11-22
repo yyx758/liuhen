@@ -26,6 +26,24 @@ export function sortTasks(tasks: Task[]) {
   return [...tasks].sort((a, b) => (a.start_at || a.due_at || '').localeCompare(b.start_at || b.due_at || ''))
 }
 
+/** 提醒设置的说法，与后端提案展示一致。 */
+export function reminderLabel(minutes: number | null | undefined) {
+  if (minutes === null || minutes === undefined) return '不提醒'
+  if (minutes === 0) return '准时提醒'
+  if (minutes % 1440 === 0) return `提前 ${minutes / 1440} 天`
+  if (minutes % 60 === 0) return `提前 ${minutes / 60} 小时`
+  return `提前 ${minutes} 分钟`
+}
+
+/** 页面上可选的提醒；Agent 设置的其他值也能正常显示。 */
+export const REMINDER_OPTIONS = [null, 0, 5, 15, 30, 60, 1440]
+
+/** 任务会不会被提醒：设置了提醒、未完成、基准时间（开始时间，没有时为截止时间）还没到。 */
+export function willRemind(task: Pick<Task, 'start_at' | 'due_at' | 'status' | 'remind_before_minutes'>, now = Date.now()) {
+  const base = task.start_at || task.due_at
+  return task.remind_before_minutes !== null && task.status === 'todo' && Boolean(base) && new Date(base!).getTime() > now
+}
+
 export function proposalChanges(action: Action) {
   if (!action.after) return [{ label: '待办', before: action.before.title, after: '删除这条待办' }]
   const fields: { key: keyof Task; label: string; format: (value: Task[keyof Task]) => string }[] = [
@@ -35,8 +53,10 @@ export function proposalChanges(action: Action) {
     { key: 'duration_minutes', label: '预计用时', format: value => value === null ? '未设置' : `${value} 分钟` },
     { key: 'due_at', label: '截止时间', format: value => value ? displayDate(String(value)) : '未设置' },
     { key: 'status', label: '状态', format: value => value === 'done' ? '已完成' : '未完成' },
+    { key: 'remind_before_minutes', label: '提醒', format: value => reminderLabel(value as number | null) },
   ]
-  return fields.filter(({ key }) => action.before[key] !== action.after?.[key]).map(({ key, label, format }) => ({
+  // 提醒字段上线前的旧快照里没有 remind_before_minutes（undefined），与 null 视为相同。
+  return fields.filter(({ key }) => (action.before[key] ?? null) !== (action.after?.[key] ?? null)).map(({ key, label, format }) => ({
     label, before: format(action.before[key]), after: format(action.after![key]),
   }))
 }

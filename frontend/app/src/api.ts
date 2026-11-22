@@ -8,11 +8,13 @@ export type Task = {
   due_at: string | null
   status: 'todo' | 'done'
   version: number
+  /** 提前多少分钟提醒；null 表示不提醒，0 表示准时。 */
+  remind_before_minutes: number | null
   created_by_agent?: boolean
 }
 
-export type TaskInput = Pick<Task, 'title' | 'priority' | 'start_at' | 'duration_minutes' | 'due_at'>
-export type TaskUpdate = Partial<Pick<Task, 'title' | 'priority' | 'start_at' | 'duration_minutes' | 'due_at' | 'status'>>
+export type TaskInput = Pick<Task, 'title' | 'priority' | 'start_at' | 'duration_minutes' | 'due_at' | 'remind_before_minutes'>
+export type TaskUpdate = Partial<Pick<Task, 'title' | 'priority' | 'start_at' | 'duration_minutes' | 'due_at' | 'status' | 'remind_before_minutes'>>
 
 export type Action = {
   id: number
@@ -76,6 +78,8 @@ export type CurrentUser = {
   email: string | null
   /** 邮箱是否已通过验证码验证；只有已验证的邮箱能找回密码。 */
   email_verified: boolean
+  /** 是否接收提醒邮件；邮箱未验证时无论开关都不发。 */
+  email_reminders: boolean
   role: 'user' | 'admin'
   must_change_password: boolean
   created_at: string
@@ -84,6 +88,17 @@ export type CurrentUser = {
 }
 
 export type UserStatus = 'pending' | 'active' | 'rejected' | 'disabled'
+
+/** 页面内通知；missed 表示提醒到点时服务不可用、超过 1 小时才处理。 */
+export type AppNotification = {
+  id: number
+  kind: 'reminder' | 'missed'
+  task_id: number
+  task_title: string
+  task_time: string
+  created_at: string
+  read_at: string | null
+}
 
 /** 发送验证码成功：expires_in 秒内有效，resend_after 秒后可以重新获取。 */
 export type EmailCodeSent = { expires_in: number; resend_after: number }
@@ -214,6 +229,13 @@ export const api = {
   changeEmail: (email: string | null, code: string | null, currentPassword: string) => request<CurrentUser>('/auth/me', {
     method: 'PATCH', body: JSON.stringify({ email, code, current_password: currentPassword }),
   }),
+  setPreferences: (emailReminders: boolean) => request<CurrentUser>('/auth/me/preferences', {
+    method: 'PATCH', body: JSON.stringify({ email_reminders: emailReminders }),
+  }),
+  notifications: (limit = 20) => request<AppNotification[]>(`/notifications?limit=${limit}`),
+  unreadNotifications: () => request<{ count: number }>('/notifications/unread-count'),
+  readNotification: (id: number) => request<void>(`/notifications/${id}/read`, { method: 'POST' }),
+  readAllNotifications: () => request<void>('/notifications/read-all', { method: 'POST' }),
   sessions: () => request<LoginSession[]>('/auth/sessions'),
   revokeSession: (id: number) => request<void>(`/auth/sessions/${id}`, { method: 'DELETE' }),
   revokeOtherSessions: () => request<{ revoked: number }>('/auth/sessions/revoke-others', { method: 'POST' }),

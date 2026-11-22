@@ -206,6 +206,37 @@ class ScenarioGradingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(judged.get("skipped"), "template_reply")
 
 
+    async def test_reminder_scenarios_grade_reminder_fields(self) -> None:
+        explicit = await run_scripted("27", [{"name": "create_task", "arguments": {
+            "title": "开组会", "start_at": "2030-01-02T10:00:00+08:00", "remind_before_minutes": 30,
+        }}, "已创建明天 10:00 的组会，开始前 30 分钟提醒你。"])
+        self.assert_passed(explicit)
+
+        on_time = await run_scripted("28", [{"name": "create_task", "arguments": {
+            "title": "交周报", "due_at": "2030-01-02T15:00:00+08:00", "remind_before_minutes": 0,
+        }}, "已创建，明天 15:00 准时提醒你交周报。"])
+        self.assert_passed(on_time)
+        # "提醒我"却没设提醒：业务分不通过。
+        missing = await run_scripted("28", [{"name": "create_task", "arguments": {
+            "title": "交周报", "start_at": "2030-01-02T15:00:00+08:00",
+        }}, "已创建。"])
+        self.assertIn("wrong_reminder", missing["business_accuracy"]["failure_tags"])
+
+        for case_id, value in (("29", 60), ("30", None)):
+            with self.subTest(case_id=case_id):
+                proposed = await run_scripted(case_id, [{"name": "propose_update", "arguments": {
+                    "task_id": 1, "changes": {"remind_before_minutes": value},
+                }}, "已生成"])
+                self.assert_passed(proposed)
+                self.assertEqual(proposed["tasks"], proposed["initial_tasks"])
+
+    async def test_create_without_reminder_request_must_not_set_one(self) -> None:
+        result = await run_scripted("01", [{"name": "create_task", "arguments": {
+            "title": "学习Agent", "start_at": "2030-01-02T15:00:00+08:00", "remind_before_minutes": 15,
+        }}, "已创建。"])
+        self.assertIn("unexpected_reminder", result["business_accuracy"]["failure_tags"])
+
+
 class SummaryTests(unittest.TestCase):
     def test_summary_reports_unstable_groups(self) -> None:
         def run(case_id: str, score: int, anchor: str = "standard") -> dict:

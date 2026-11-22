@@ -23,6 +23,7 @@ export default defineConfig({
       '/actions': backend,
       '/audit': backend,
       '/admin': backend,
+      '/notifications': backend,
     },
   },
 })

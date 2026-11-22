@@ -27,6 +27,11 @@ class TaskCreate(BaseModel):
     # 截止时间不参与结束时间计算或日程冲突判断
     due_at: datetime | None = Field(default=None, description="可选的任务截止时间；与开始时间和时长独立")
 
+    remind_before_minutes: int | None = Field(
+        default=None, ge=0, le=10080,
+        description="可选：提前多少分钟提醒（0 表示准时）；按开始时间计算，没有开始时间时按截止时间。用户没有要求提醒时不要填写",
+    )
+
     @field_validator("start_at", "due_at")
     @classmethod
     def normalize_timezone(cls, value: datetime | None) -> datetime | None:
@@ -67,6 +72,7 @@ class TaskRead(BaseModel):
     due_at: datetime | None = None
     status:Literal["todo","done"] = "todo"
     version: int = 1
+    remind_before_minutes: int | None = None
 
     @model_validator(mode="after")
     def require_time(self):
@@ -102,6 +108,9 @@ class TaskUpdate(BaseModel):
     duration_minutes: int | None = Field(default=None, gt=0, description="新的占用分钟数")
     due_at: datetime | None = None
     status: Literal["todo", "done"] | None = None
+    remind_before_minutes: int | None = Field(
+        default=None, ge=0, le=10080, description="新的提前提醒分钟数（0 表示准时）；null 表示取消提醒",
+    )
 
     @field_validator("start_at", "end_at", "due_at")
     @classmethod

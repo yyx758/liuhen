@@ -4,10 +4,11 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api'
 import { auth, logout, refreshPendingUsers } from './auth'
 import { PASSWORD_PATH } from './router'
-import { displayDate, taskDate, taskTime } from './format'
+import { displayDate, reminderLabel, taskDate, taskTime } from './format'
 import { refresh, runAction, state } from './state'
 import Icon from './components/Icon.vue'
 import TaskDialog from './components/TaskDialog.vue'
+import NotificationBell from './components/NotificationBell.vue'
 
 const nav = [
   ['/', '首页'], ['/chat', '对话'], ['/calendar', '日历'],
@@ -72,7 +73,7 @@ async function deleteTask(id: number, version: number) {
         <RouterLink v-for="[path, label] in nav" :key="path" :to="path" active-class="active">{{ label }}<span v-if="path === '/history' && pendingCount" class="count">{{ pendingCount }}</span></RouterLink>
         <template v-if="auth.user?.role === 'admin'"><span class="nav-sep" aria-hidden="true"></span><RouterLink to="/admin" active-class="active">管理<span v-if="auth.pendingUsers" class="count" title="待审核账号">{{ auth.pendingUsers }}</span></RouterLink></template>
       </nav>
-      <div class="top-actions"><button class="top-new" type="button" @click="state.editorTaskId = null; state.editorOpen = true"><Icon name="plus" :size="15" />记一笔</button><div class="user-menu">
+      <div class="top-actions"><NotificationBell v-if="auth.user && !auth.user.must_change_password" /><button class="top-new" type="button" @click="state.editorTaskId = null; state.editorOpen = true"><Icon name="plus" :size="15" />记一笔</button><div class="user-menu">
           <button class="avatar" type="button" aria-haspopup="menu" :aria-expanded="menuOpen" :aria-label="`账号菜单：${auth.user?.username ?? ''}`" @click="menuOpen = !menuOpen">{{ auth.user?.username.slice(0, 1).toUpperCase() }}</button>
           <div v-if="menuOpen" class="user-menu-panel" role="menu">
             <div class="user-menu-who"><b>{{ auth.user?.username }}</b>{{ auth.user?.role === 'admin' ? '管理员' : '普通用户' }}</div>
@@ -104,7 +105,7 @@ async function deleteTask(id: number, version: number) {
       <div class="detail-actions"><button class="solid" type="button" :disabled="state.busy" @click="toggleTask(detail.id, detail.status, detail.version)"><Icon name="check" :size="16" />{{ detail.status === 'done' ? '标记未完成' : '标记完成' }}</button><button class="outline" type="button" @click="state.editorTaskId = detail.id; state.detailTaskId = null; state.editorOpen = true"><Icon name="edit" :size="15" />编辑</button><button class="text-btn danger" type="button" :disabled="state.busy" @click="deleteTask(detail.id, detail.version)"><Icon name="trash" :size="15" />删除</button></div>
       <div class="detail-section"><h3 class="subheading">任务描述</h3><p class="small" style="line-height:2;white-space:pre-wrap">还没有添加备注。</p></div>
       <div class="detail-section"><h3 class="subheading">子任务 <span class="tiny">0 / 0</span></h3><p class="small">拆分成几个小步骤，会更容易开始。</p><form style="display:flex;gap:7px;margin-top:13px" @submit.prevent="state.toast = '子任务尚未接入后端。'"><input class="field" placeholder="添加一个子任务" required maxlength="90" /><button class="outline" type="submit" aria-label="添加子任务"><Icon name="plus" :size="17" /></button></form></div>
-      <div class="detail-section"><h3 class="subheading">关于这条待办</h3><div class="meta-line">分类 · 其他</div><div class="meta-line">优先级 · {{ detail.priority === 'high' ? '高' : detail.priority === 'medium' ? '中' : '低' }}</div><div class="meta-line">创建方式 · {{ detailIsAi ? '小记建议' : '手动添加' }}</div><div v-if="detail.due_at" class="meta-line">截止时间 · {{ displayDate(detail.due_at) }}</div></div>
+      <div class="detail-section"><h3 class="subheading">关于这条待办</h3><div class="meta-line">分类 · 其他</div><div class="meta-line">优先级 · {{ detail.priority === 'high' ? '高' : detail.priority === 'medium' ? '中' : '低' }}</div><div class="meta-line">创建方式 · {{ detailIsAi ? '小记建议' : '手动添加' }}</div><div class="meta-line">提醒 · {{ reminderLabel(detail.remind_before_minutes) }}</div><div v-if="detail.due_at" class="meta-line">截止时间 · {{ displayDate(detail.due_at) }}</div></div>
     </section>
   </div>
   <div v-if="!isBarePage && state.toast" class="toast" role="status"><span>{{ state.toast }}</span><button type="button" aria-label="关闭" @click="state.toast = ''">×</button></div>

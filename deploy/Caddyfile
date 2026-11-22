@@ -8,7 +8,7 @@ liuhen.yyyyx.top {
 
     # 访问控制由应用自己的账号登录负责（D7）；Caddy 只做 HTTPS 和转发。
     # reverse_proxy 默认带上 X-Forwarded-For，API 据此按真实 IP 限流。
-    @api path /auth /auth/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/* /admin /admin/*
+    @api path /auth /auth/* /tasks /tasks/* /chat /chat/* /actions /actions/* /audit /audit/* /admin /admin/* /notifications /notifications/*
     handle @api {
         reverse_proxy api:8000
     }

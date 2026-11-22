@@ -18,6 +18,12 @@ class PasswordChangeRequest(BaseModel):
     new_password: str = Field(min_length=1, max_length=128)
 
 
+class PreferencesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email_reminders: bool = Field(description="是否接收提醒邮件；邮箱未验证时无论开关都不发")
+
+
 class ChatUsage(BaseModel):
     today: int = Field(description="今天（UTC+08:00）已用的对话轮数")
     limit: int | None = Field(description="每日上限；管理员不限量时为 null")
@@ -28,6 +34,7 @@ class UserRead(BaseModel):
     username: str
     email: str | None
     email_verified: bool
+    email_reminders: bool
     role: str
     must_change_password: bool
     created_at: datetime
