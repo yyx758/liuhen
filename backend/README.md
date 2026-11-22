@@ -35,6 +35,7 @@
 - 个人设置：`POST /auth/me/email-code` 向新邮箱（或尚未验证的当前邮箱）发验证码，`PATCH /auth/me` 凭验证码修改或验证邮箱、留空清除（都需当前密码）、`/auth/sessions` 在线设备与下线、`GET /auth/events` 最近 30 天的登录与密码事件。除 `GET /auth/me`、`POST /auth/password` 外，这些接口在强制改密期间同样返回 403。
 - 账号事件 `account_events` 只追加，与账号变更同一事务提交：注册、审核、停用/启用、删除、改密/重置、改邮箱、角色变更、登录成功/失败/锁定、下线设备。账号不存在的登录失败不入表；`target_user_id`、`actor_user_id` 不加外键，账号删除后记录仍保留，命令行操作的 `actor_user_id` 为空。
 - 每日对话上限：普通用户每个 UTC+08:00 自然日最多新建 `daily_chat_limit` 轮对话（为空时取 `default_daily_chat_limit` / `LIUHEN_DEFAULT_DAILY_CHAT_LIMIT`，默认 50），超出时 `POST /chat` 返回 429；管理员不受限制但照常计数。检查在 `acquire_turn` 新建轮次的同一事务里进行，先锁用户行，并发请求不能突破上限；同一 `request_id` 重试不计数。删除会话时被删轮次的创建时间保留在 `deleted_chat_requests.turn_created_at`，用量统计两处相加，删除会话不能重置用量。`/auth/me` 返回 `chat_usage`；管理员列表与详情返回今日、近 7 天用量，`PATCH /admin/users/{id}` 调整单个用户的上限（`null` 恢复默认）。
+- 任务提醒（`docs/prd/prd-reminder.md`）：任务的 `remind_before_minutes`（0–10080，空为不提醒）按开始时间、没有时按截止时间计算提醒时间，提醒状态存在 `task_reminders`（每个任务最多一条 `pending`，改期时作废旧行再插新行）。任务创建、修改、确认修改提案时在同一事务里重建；删除时外键级联删除。后台 `reminder_loop` 每 30 秒用 `FOR UPDATE SKIP LOCKED` 取出到点的提醒，生成 `notifications`；晚到超过 1 小时记为"已错过"、不发邮件。邮件只发给邮箱已验证且开启 `email_reminders` 的用户，先标记"发送中"（5 分钟租约）再在事务外发送，失败按 1、5 分钟重试，第 3 次失败或超过 1 小时放弃（至少一次语义）。
 - 账号管理命令行：
 
   ```powershell
@@ -125,6 +126,9 @@ python -m backend.app.main
 | `POST /auth/register/email-code`、`POST /auth/register` | 获取注册验证码；凭验证码注册 |
 | `POST /auth/password-reset/email-code`、`POST /auth/password-reset` | 获取找回密码验证码；凭验证码重置密码 |
 | `POST /auth/me/email-code`、`PATCH /auth/me` | 获取绑定邮箱验证码；修改、验证或清除邮箱 |
+| `PATCH /auth/me/preferences` | 邮件提醒开关 `{email_reminders}` |
+| `GET /notifications`、`GET /notifications/unread-count` | 通知列表（新的在前，`limit`、`before_id`）；未读数 |
+| `POST /notifications/{id}/read`、`POST /notifications/read-all` | 标为已读 |
 | `POST /chat` | 发送一轮自然语言消息；请求包含 `request_id`、`user_text`，后续轮次带上 `conversation_id` |
 | `DELETE /chat/conversations/{conversation_id}` | 删除会话与消息；处理中的会话不可删除，任务与审计保留 |
 | `POST /tasks` | 直接创建任务；请求头包含 `Idempotency-Key` |
