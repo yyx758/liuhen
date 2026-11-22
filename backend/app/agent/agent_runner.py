@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -12,6 +12,12 @@ from backend.app.agent.llm import ask_llm
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.db.session import SessionLocal
 from backend.app.config.settings import USER_TIMEZONE, USER_TIMEZONE_NAME
+
+
+def upcoming_weekdays(local_now: datetime, days: int = 14) -> str:
+    """模型自行推算星期容易出错（测评中把周四说成周三），直接给出对照表。"""
+    dates = (local_now + timedelta(days=offset) for offset in range(days))
+    return "、".join(f"{day:%m-%d}星期{'一二三四五六日'[day.weekday()]}" for day in dates)
 
 
 def execute_one_tool(
@@ -58,7 +64,9 @@ async def run_agent_loop(
                 "你是留痕个人待办助手，只能调用提供给你的工具。"
                 f"当前本地时间为 {local_now.isoformat(timespec='minutes')}"
                 f"（星期{'一二三四五六日'[local_now.weekday()]}），"
-                f"用户时区为 {USER_TIMEZONE_NAME}。用户只需用自然语言说明时间，"
+                f"用户时区为 {USER_TIMEZONE_NAME}。"
+                f"今天起 14 天的日期与星期：{upcoming_weekdays(local_now)}；"
+                "回复中提到星期几时以此为准，不要自行推算。用户只需用自然语言说明时间，"
                 "不需要填写工具参数或时区。"
                 "创建任务时，把明确的相对时间换算为完整日期和时间；"
                 "创建任务至少需要开始时间或截止时间中的一个；两者都不明确时先追问，不猜测。"

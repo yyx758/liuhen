@@ -72,6 +72,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(answer, "已创建学习Agent任务")
         self.assertIn("当前本地时间为 2030-01-01T12:00+08:00", seen[0][0]["content"])
+        self.assertIn("01-02星期三", seen[0][0]["content"])
         with Session(self.engine) as session:
             tasks = list(session.scalars(select(TaskORM)).all())
             events = list(session.scalars(select(OperationEventORM)).all())
