@@ -6,12 +6,12 @@ from contextlib import asynccontextmanager, suppress
 import uvicorn
 from fastapi import FastAPI
 
-from backend.app.api import admin, auth, tasks, actions, chat, audit
+from backend.app.api import admin, auth, tasks, actions, chat, audit, notifications
 from backend.app.api.security import check_origin
 from backend.app.db.migrations import ensure_schema_current
 from backend.app.db.session import engine
 from backend.app.db.session import SessionLocal
-from backend.app.services import action_service, auth_service
+from backend.app.services import action_service, auth_service, reminder_service
 
 
 logger = logging.getLogger(__name__)
@@ -37,18 +37,42 @@ async def expiry_loop() -> None:
         await asyncio.sleep(60)
 
 
+def fire_reminders() -> int:
+    with SessionLocal() as session:
+        return reminder_service.fire_due_reminders(session)
+
+
+def send_reminder_emails() -> int:
+    with SessionLocal() as session:
+        return reminder_service.send_pending_emails(session)
+
+
+async def reminder_loop() -> None:
+    """每 30 秒触发到点的提醒并发送提醒邮件（PRD R1、R2）。状态都在数据库里，重启后接着处理。"""
+    while True:
+        for job, label in ((fire_reminders, "提醒触发"), (send_reminder_emails, "提醒邮件发送")):
+            try:
+                # 同步的数据库与 SMTP 调用放到线程池，不阻塞事件循环。
+                await asyncio.to_thread(job)
+            except Exception:
+                logger.exception("%s失败", label)
+        await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
     # 表结构由 Alembic 迁移维护；版本不是最新时拒绝启动，避免新代码跑在旧表上。
     ensure_schema_current(engine)
     expiry_task = asyncio.create_task(expiry_loop())
+    reminder_task = asyncio.create_task(reminder_loop())
     try:
         yield
     finally:
-        expiry_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await expiry_task
+        for task in (expiry_task, reminder_task):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 app = FastAPI(
@@ -66,6 +90,7 @@ app.include_router(tasks.router)
 app.include_router(actions.router)
 app.include_router(chat.router)
 app.include_router(audit.router)
+app.include_router(notifications.router)
 
 
 if __name__ == "__main__":

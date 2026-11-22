@@ -8,7 +8,7 @@ from backend.app.schemas.account import (
     EmailChangeRequest, EmailCodeRequest, EmailCodeSent, OwnEmailCodeRequest, OwnEventRead, PasswordResetRequest,
     RegisterRead, RegisterRequest, RevokedRead, SessionRead,
 )
-from backend.app.schemas.auth import ChatUsage, LoginRequest, PasswordChangeRequest, UserRead
+from backend.app.schemas.auth import ChatUsage, LoginRequest, PasswordChangeRequest, PreferencesRequest, UserRead
 from backend.app.services import account_event_service, account_service, auth_service, usage_service
 from backend.app.services.auth_service import REMEMBER_SECONDS, SESSION_COOKIE, CurrentUser
 
@@ -22,6 +22,7 @@ def to_user_read(user: CurrentUser, session: DbSession) -> UserRead:
     )
     return UserRead(
         id=user.id, username=user.username, email=user.email, email_verified=user.email_verified,
+        email_reminders=user.email_reminders,
         role=user.role, must_change_password=user.must_change_password, created_at=user.created_at,
         chat_usage=ChatUsage(today=today, limit=limit),
     )
@@ -110,6 +111,12 @@ def change_email(data: EmailChangeRequest, user: ActiveUser, session: DbSession)
         session, user_id=user.id, email=data.email, code=data.code, current_password=data.current_password,
     )
     return to_user_read(user, session).model_copy(update={"email": email, "email_verified": verified})
+
+
+@router.patch("/me/preferences", response_model=UserRead)
+def set_preferences(data: PreferencesRequest, user: ActiveUser, session: DbSession) -> UserRead:
+    auth_service.set_preferences(session, user_id=user.id, email_reminders=data.email_reminders)
+    return to_user_read(user, session).model_copy(update={"email_reminders": data.email_reminders})
 
 
 @router.get("/sessions", response_model=list[SessionRead])

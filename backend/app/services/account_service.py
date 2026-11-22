@@ -107,7 +107,8 @@ def create_admin(session: Session, *, username: str, password: str, email: str |
         )
         # 返回普通数据：提交后 ORM 对象可能过期，调用方关闭 Session 后再读属性会出错。
         return UserRead(
-            id=user.id, username=user.username, email=user.email, email_verified=False, role=user.role,
+            id=user.id, username=user.username, email=user.email, email_verified=False, email_reminders=True,
+            role=user.role,
             must_change_password=user.must_change_password, created_at=user.created_at,
         )
 
