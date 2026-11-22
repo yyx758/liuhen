@@ -11,7 +11,9 @@ const form = reactive({ date: today(), time: '14:00', priority: 'medium' as Task
 // Agent 可能设置了预设以外的值（如提前 2 小时），编辑时也要能选中它。
 const reminderOptions = computed(() => {
   const current = editing.value?.remind_before_minutes ?? null
-  return REMINDER_OPTIONS.includes(current) ? REMINDER_OPTIONS : [...REMINDER_OPTIONS, current]
+  if (REMINDER_OPTIONS.includes(current)) return REMINDER_OPTIONS
+  // null（不提醒）排第一，其余按分钟数从小到大。
+  return [...REMINDER_OPTIONS, current].sort((a, b) => (a ?? -1) - (b ?? -1))
 })
 const reminderPassed = computed(() => {
   if (form.remind === '') return false
