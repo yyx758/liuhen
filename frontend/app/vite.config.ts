@@ -1,5 +1,12 @@
 import vue from '@vitejs/plugin-vue'
-import { defineConfig } from 'vite'
+import { defineConfig, type ProxyOptions } from 'vite'
+
+// 后端接口前缀与前端路由（/tasks、/chat）重名：浏览器地址栏直接打开或刷新页面时
+// 请求的是 HTML，交给前端处理；fetch 请求才转发到后端。
+const backend: ProxyOptions = {
+  target: 'http://127.0.0.1:8000',
+  bypass: req => (req.headers.accept?.includes('text/html') ? '/index.html' : undefined),
+}
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -10,10 +17,12 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/tasks': 'http://127.0.0.1:8000',
-      '/chat': 'http://127.0.0.1:8000',
-      '/actions': 'http://127.0.0.1:8000',
-      '/audit': 'http://127.0.0.1:8000',
+      '/auth': backend,
+      '/tasks': backend,
+      '/chat': backend,
+      '/actions': backend,
+      '/audit': backend,
+      '/admin': backend,
     },
   },
 })

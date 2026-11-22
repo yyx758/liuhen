@@ -16,6 +16,7 @@ def record_event(
     event_type: str,
     task_id: int,
     *,
+    user_id: int,
     action_id: int | None = None,
     from_status: str | None = None,
     to_status: str | None = None,
@@ -24,6 +25,7 @@ def record_event(
     request_id: str | None = None,
 ) -> None:
     session.add(OperationEventORM(
+        user_id=user_id,
         event_type=event_type,
         task_id=task_id,
         action_id=action_id,
@@ -40,13 +42,14 @@ def record_event(
 
 def _event_conditions(
     *,
+    user_id: int,
     task_id: int | None = None,
     action_id: int | None = None,
     request_id: str | None = None,
     since: int | None = None,
     category: Literal["all", "failed", "cancelled"] = "all",
 ):
-    conditions = []
+    conditions = [OperationEventORM.user_id == user_id]
     if task_id is not None:
         conditions.append(OperationEventORM.task_id == task_id)
     if action_id is not None:
@@ -78,6 +81,7 @@ def _read_rows(session: Session, rows: list[OperationEventORM]) -> list[Operatio
     proposal_titles = {}
     if missing_action_ids:
         created = session.scalars(select(OperationEventORM).where(
+            OperationEventORM.user_id.in_({row.user_id for row in rows}),
             OperationEventORM.action_id.in_(missing_action_ids),
             OperationEventORM.event_type == "proposal_created",
         )).all()
@@ -105,6 +109,7 @@ def _read_rows(session: Session, rows: list[OperationEventORM]) -> list[Operatio
 def list_events(
     session: Session,
     *,
+    user_id: int,
     task_id: int | None = None,
     action_id: int | None = None,
     before_id: int | None = None,
@@ -114,7 +119,7 @@ def list_events(
     limit: int = 50,
 ) -> list[OperationEventRead]:
     conditions = _event_conditions(
-        task_id=task_id, action_id=action_id, request_id=request_id,
+        user_id=user_id, task_id=task_id, action_id=action_id, request_id=request_id,
         since=since, category=category,
     )
     if before_id is not None:
@@ -129,6 +134,7 @@ def list_events(
 def page_events(
     session: Session,
     *,
+    user_id: int,
     page: int,
     page_size: int,
     task_id: int | None = None,
@@ -139,7 +145,7 @@ def page_events(
     anchor_id: int | None = None,
 ) -> AuditEventPageRead:
     conditions = _event_conditions(
-        task_id=task_id, action_id=action_id, request_id=request_id,
+        user_id=user_id, task_id=task_id, action_id=action_id, request_id=request_id,
         since=since, category=category,
     )
     if anchor_id is None:
@@ -166,8 +172,10 @@ def page_events(
     )
 
 
-def summary(session: Session, *, since: int | None = None) -> AuditSummaryRead:
-    conditions = [OperationEventORM.created_at >= since] if since is not None else []
+def summary(session: Session, *, user_id: int, since: int | None = None) -> AuditSummaryRead:
+    conditions = [OperationEventORM.user_id == user_id]
+    if since is not None:
+        conditions.append(OperationEventORM.created_at >= since)
     counts = dict(session.execute(
         select(OperationEventORM.event_type, func.count())
         .where(*conditions)

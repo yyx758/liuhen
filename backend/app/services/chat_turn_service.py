@@ -10,7 +10,7 @@ from sqlalchemy import select, text
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.models.conversation import ConversationORM
 from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM
-from backend.app.services import conversation_service
+from backend.app.services import conversation_service, usage_service
 
 
 LEASE_SECONDS = 120
@@ -29,7 +29,12 @@ class TurnState:
     answer: str | None
 
 
-def acquire_turn(request_id: str, user_text: str, conversation_id: str | None, session_factory) -> TurnState:
+REQUEST_ID_TAKEN = "请求 ID 已被使用，请为新消息生成新的请求 ID"
+
+
+def acquire_turn(
+    request_id: str, user_text: str, conversation_id: str | None, session_factory, *, user_id: int
+) -> TurnState:
     owner_token = str(uuid4())
     now = now_timestamp()
     with session_factory() as session, session.begin():
@@ -42,10 +47,17 @@ def acquire_turn(request_id: str, user_text: str, conversation_id: str | None, s
                 text("SELECT pg_advisory_xact_lock(3, hashtext(:key))"),
                 {"key": conversation_id},
             )
-        if session.get(DeletedChatRequestORM, request_id) is not None:
+        # request_id 由客户端生成、全局唯一。命中别人的记录时只说"已被使用"，
+        # 不回放别人的回答，也不透露对方会话是否已删除。
+        deleted = session.get(DeletedChatRequestORM, request_id)
+        if deleted is not None:
+            if deleted.user_id != user_id:
+                raise HTTPException(409, REQUEST_ID_TAKEN)
             raise HTTPException(410, "该请求所属的会话已删除，请开始新对话")
         turn = session.get(ChatTurnORM, request_id)
         if turn is not None:
+            if turn.user_id != user_id:
+                raise HTTPException(409, REQUEST_ID_TAKEN)
             if turn.user_text != user_text or (
                 conversation_id is not None and turn.conversation_id != conversation_id
             ):
@@ -58,15 +70,18 @@ def acquire_turn(request_id: str, user_text: str, conversation_id: str | None, s
             turn.lease_until = now + LEASE_SECONDS
             return TurnState(request_id, turn.conversation_id, owner_token, list(turn.messages), None)
 
+        # 走到这里才是新的一轮：重试同一 request_id 已在上面返回，不占用额度。
+        usage_service.ensure_quota(session, user_id=user_id, now=now)
+
         if conversation_id is None:
             conversation_id = str(uuid4())
             session.add(ConversationORM(
-                id=conversation_id, created_at=now, updated_at=now, message_count=0
+                id=conversation_id, user_id=user_id, created_at=now, updated_at=now, message_count=0
             ))
             message_count = 0
         else:
             conversation = session.get(ConversationORM, conversation_id)
-            if conversation is None:
+            if conversation is None or conversation.user_id != user_id:
                 raise HTTPException(404, "会话不存在")
             message_count = conversation.message_count
 
@@ -79,6 +94,7 @@ def acquire_turn(request_id: str, user_text: str, conversation_id: str | None, s
         messages = [{"role": "user", "content": user_text}]
         session.add(ChatTurnORM(
             request_id=request_id,
+            user_id=user_id,
             conversation_id=conversation_id,
             user_text=user_text,
             status="processing",
@@ -87,6 +103,7 @@ def acquire_turn(request_id: str, user_text: str, conversation_id: str | None, s
             lease_until=now + LEASE_SECONDS,
             base_message_count=message_count,
             messages=messages,
+            created_at=now,
         ))
         return TurnState(request_id, conversation_id, owner_token, messages, None)
 
@@ -138,7 +155,8 @@ def execute_tool(
         session.info["audit_request_id"] = request_id
         session.info["audit_conversation_id"] = turn.conversation_id
         session.info["audit_tool_call_id"] = call_id
-        output = registry.execute_tool(name, arguments, session)
+        # 工具只在本轮所属用户的数据范围内执行；归属来自已保存的 turn，而不是模型参数。
+        output = registry.execute_tool(name, arguments, session, user_id=turn.user_id)
         tool_message = conversation_service.normalize_message({
             "role": "tool", "tool_call_id": call_id, "content": output
         })

@@ -114,8 +114,7 @@ def build_updated_snapshot(before: TaskRead, data: TaskUpdate) -> TaskRead:
         )
 
     if (
-        (before.start_at is not None or before.due_at is not None)
-        and changes.get("start_at", before.start_at) is None
+        changes.get("start_at", before.start_at) is None
         and changes.get("due_at", before.due_at) is None
     ):
         raise HTTPException(422, "开始时间和截止时间至少保留一个")
@@ -150,7 +149,7 @@ def rebase_batch_update(before: TaskRead, proposed: TaskRead, current: TaskRead)
 
 
 def find_schedule_conflict(
-    session: Session, task_id: int, candidate: TaskRead
+    session: Session, task_id: int, candidate: TaskRead, *, user_id: int
 ):
     if candidate.status != "todo" or candidate.start_at is None or candidate.end_at is None:
         return None
@@ -159,12 +158,11 @@ def find_schedule_conflict(
         to_db_utc(candidate.start_at),
         to_db_utc(candidate.end_at),
         exclude_task_id=task_id,
+        user_id=user_id,
     )
 
 
-def expire_pending_with_audit(
-    session: Session, now: int, task_id: int | None = None
-) -> int:
+def expire_pending_with_audit(session: Session, now: int, task_id: int) -> int:
     due = action_repository.list_due_pending(session, now, task_id)
     if not due:
         return 0
@@ -173,7 +171,7 @@ def expire_pending_with_audit(
         raise RuntimeError("提案过期状态与审计记录不一致")
     for old in due:
         audit_service.record_event(
-            session, "proposal_expired", old.task_id, action_id=old.id,
+            session, "proposal_expired", old.task_id, user_id=old.user_id, action_id=old.id,
             from_status="pending", to_status="expired",
             reason="提案超过确认期限",
         )
@@ -193,12 +191,12 @@ def save_proposal(session: Session, action: PendingActionORM, now: int) -> Pendi
     action_repository.insert_action(session, action)
     for old in old_pending:
         audit_service.record_event(
-            session, "proposal_replaced", old.task_id, action_id=old.id,
+            session, "proposal_replaced", old.task_id, user_id=old.user_id, action_id=old.id,
             from_status="pending", to_status="replaced",
             details={"replaced_by_action_id": action.id},
         )
     audit_service.record_event(
-        session, "proposal_created", action.task_id, action_id=action.id,
+        session, "proposal_created", action.task_id, user_id=action.user_id, action_id=action.id,
         to_status="pending",
         details={
             "action_type": action.action_type,
@@ -214,13 +212,16 @@ def save_proposal(session: Session, action: PendingActionORM, now: int) -> Pendi
 def propose_update(
     session: Session,
     task_id: int,
-    data: TaskUpdate
+    data: TaskUpdate,
+    *,
+    user_id: int,
 ) -> PendingAction:
 
     with nullcontext() if session.info.get("chat_tool_transaction") else session.begin():
 
         task = task_repository.get_task_by_id(
             session, task_id,
+            user_id=user_id,
             for_update=True,
         )
 
@@ -237,12 +238,13 @@ def propose_update(
         ):
             raise HTTPException(409, "修改前后没有变化")
 
-        conflict = find_schedule_conflict(session, task_id, after)
+        conflict = find_schedule_conflict(session, task_id, after, user_id=user_id)
         if conflict is not None:
             raise HTTPException(409, f"时间与任务 {conflict.id} 冲突")
 
         now = now_timestamp()
         action = PendingActionORM(
+            user_id=user_id,
             task_id=task_id,
             action_type="update",
             status="pending",
@@ -263,13 +265,16 @@ def propose_update(
 
 def propose_delete(
     session: Session,
-    task_id: int
+    task_id: int,
+    *,
+    user_id: int,
 ) -> PendingAction:
 
     with nullcontext() if session.info.get("chat_tool_transaction") else session.begin():
 
         task = task_repository.get_task_by_id(
             session, task_id,
+            user_id=user_id,
             for_update=True,
         )
 
@@ -279,6 +284,7 @@ def propose_delete(
         before = to_task_read(task)
         now = now_timestamp()
         action = PendingActionORM(
+            user_id=user_id,
             task_id=task_id,
             action_type="delete",
             status="pending",
@@ -295,12 +301,6 @@ def propose_delete(
     return result
 
 
-def expire_due_actions(session: Session) -> int:
-    """Mark unattended proposals expired; retain their snapshots as history."""
-    with session.begin():
-        return expire_pending_with_audit(session, now_timestamp())
-
-
 def purge_expired_actions(session: Session) -> int:
     """Delete elapsed proposals; preserve expiry and deletion audit rows."""
     with session.begin():
@@ -313,12 +313,12 @@ def purge_expired_actions(session: Session) -> int:
                 raise RuntimeError("过期提案清理时状态发生变化")
             if action.status == "pending":
                 audit_service.record_event(
-                    session, "proposal_expired", action.task_id, action_id=action.id,
+                    session, "proposal_expired", action.task_id, user_id=action.user_id, action_id=action.id,
                     from_status="pending", to_status="expired",
                     reason="提案超过确认期限",
                 )
             audit_service.record_event(
-                session, "proposal_deleted", action.task_id, action_id=action.id,
+                session, "proposal_deleted", action.task_id, user_id=action.user_id, action_id=action.id,
                 from_status="expired", reason="系统清理过期提案",
             )
         return len(due)
@@ -328,11 +328,13 @@ def purge_expired_actions(session: Session) -> int:
 
 def get_action(
     session: Session,
-    action_id: int
+    action_id: int,
+    *,
+    user_id: int,
 ) -> PendingAction:
 
     action = action_repository.get_action_by_id(
-        session, action_id
+        session, action_id, user_id=user_id
     )
 
     if action is None:
@@ -341,23 +343,27 @@ def get_action(
     return to_action_read(action)
 
 
-def list_active_pending(session: Session) -> list[ActionListItem]:
+def list_active_pending(session: Session, *, user_id: int) -> list[ActionListItem]:
     return [ActionListItem.model_validate(action.model_dump()) for action in (
-        to_action_read(row) for row in action_repository.list_active_pending(session, now_timestamp())
+        to_action_read(row)
+        for row in action_repository.list_active_pending(session, now_timestamp(), user_id=user_id)
     )]
 
 
-def list_for_conversation(session: Session, conversation_id: str) -> list[ActionListItem]:
+def list_for_conversation(session: Session, conversation_id: str, *, user_id: int) -> list[ActionListItem]:
     return [ActionListItem.model_validate({
         **to_action_read(row).model_dump(), "request_id": request_id,
-    }) for row, request_id in action_repository.list_for_conversation(session, conversation_id)]
+    }) for row, request_id in action_repository.list_for_conversation(
+        session, conversation_id, user_id=user_id
+    )]
 
 
-def delete_expired_action(session: Session, action_id: int) -> None:
+def delete_expired_action(session: Session, action_id: int, *, user_id: int) -> None:
     """Remove an elapsed proposal while retaining its append-only audit trail."""
     with session.begin():
         action = action_repository.get_action_by_id(
             session, action_id,
+            user_id=user_id,
             for_update=True,
         )
         if action is None:
@@ -372,12 +378,12 @@ def delete_expired_action(session: Session, action_id: int) -> None:
 
         if action.status == "pending":
             audit_service.record_event(
-                session, "proposal_expired", action.task_id, action_id=action_id,
+                session, "proposal_expired", action.task_id, user_id=action.user_id, action_id=action_id,
                 from_status="pending", to_status="expired",
                 reason="提案超过确认期限",
             )
         audit_service.record_event(
-            session, "proposal_deleted", action.task_id, action_id=action_id,
+            session, "proposal_deleted", action.task_id, user_id=action.user_id, action_id=action_id,
             from_status="expired", reason="用户删除过期提案",
         )
 
@@ -386,7 +392,9 @@ def delete_expired_action(session: Session, action_id: int) -> None:
 
 def confirm_action(
     session: Session,
-    action_id: int
+    action_id: int,
+    *,
+    user_id: int,
 ) -> PendingAction:
 
     error = None
@@ -394,7 +402,7 @@ def confirm_action(
 
     with session.begin():
         action = action_repository.get_action_by_id(
-            session, action_id
+            session, action_id, user_id=user_id
         )
 
         if action is None:
@@ -416,7 +424,7 @@ def confirm_action(
             ):
                 raise RuntimeError("无法记录提案过期状态")
             audit_service.record_event(
-                session, "proposal_expired", action.task_id, action_id=action_id,
+                session, "proposal_expired", action.task_id, user_id=action.user_id, action_id=action_id,
                 from_status="pending", to_status="expired",
                 reason="提案超过确认期限",
             )
@@ -456,6 +464,7 @@ def confirm_action(
                         if action.batch_id is not None:
                             current_task = task_repository.get_task_by_id(
                                 session, action.task_id,
+                                user_id=user_id,
                                 for_update=True,
                             )
                             if current_task is not None:
@@ -489,7 +498,7 @@ def confirm_action(
                         ):
                             raise ActionExecutionError("提案时间快照不合法")
 
-                        conflict = find_schedule_conflict(session, action.task_id, after)
+                        conflict = find_schedule_conflict(session, action.task_id, after, user_id=user_id)
                         if conflict is not None:
                             if not action_repository.transition_status(
                                 session, action_id, "executed", "conflicted"
@@ -497,7 +506,7 @@ def confirm_action(
                                 raise RuntimeError("无法记录提案冲突状态")
                             error = f"时间与任务 {conflict.id} 冲突，请重新创建提案"
                             audit_service.record_event(
-                                session, "proposal_conflicted", action.task_id,
+                                session, "proposal_conflicted", action.task_id, user_id=action.user_id,
                                 action_id=action_id, from_status="pending",
                                 to_status="conflicted", reason=error,
                             )
@@ -525,7 +534,7 @@ def confirm_action(
                             raise RuntimeError("无法记录提案冲突状态")
                         error = "任务版本已变化，请重新创建提案"
                         audit_service.record_event(
-                            session, "proposal_conflicted", action.task_id,
+                            session, "proposal_conflicted", action.task_id, user_id=action.user_id,
                             action_id=action_id, from_status="pending",
                             to_status="conflicted", reason=error,
                         )
@@ -538,7 +547,7 @@ def confirm_action(
                     raise RuntimeError("无法记录提案冲突状态") from exc
                 error = "时间与其他任务冲突，请重新创建提案"
                 audit_service.record_event(
-                    session, "proposal_conflicted", action.task_id,
+                    session, "proposal_conflicted", action.task_id, user_id=action.user_id,
                     action_id=action_id, from_status="pending",
                     to_status="conflicted", reason=error,
                 )
@@ -549,7 +558,7 @@ def confirm_action(
                     raise RuntimeError("无法记录提案冲突状态") from exc
                 error = str(exc)
                 audit_service.record_event(
-                    session, "proposal_conflicted", action.task_id,
+                    session, "proposal_conflicted", action.task_id, user_id=action.user_id,
                     action_id=action_id, from_status="pending",
                     to_status="conflicted", reason=error,
                 )
@@ -563,12 +572,12 @@ def confirm_action(
                 error = str(exc)
                 error_status = 500
                 audit_service.record_event(
-                    session, "proposal_failed", action.task_id, action_id=action_id,
+                    session, "proposal_failed", action.task_id, user_id=action.user_id, action_id=action_id,
                     from_status="pending", to_status="failed", reason=error,
                 )
             if error is None:
                 audit_service.record_event(
-                    session, "proposal_executed", action.task_id, action_id=action_id,
+                    session, "proposal_executed", action.task_id, user_id=action.user_id, action_id=action_id,
                     from_status="pending", to_status="executed",
                     details={
                         "action_type": action.action_type,
@@ -594,14 +603,16 @@ def confirm_action(
 
 def cancel_action(
     session: Session,
-    action_id: int
+    action_id: int,
+    *,
+    user_id: int,
 ) -> PendingAction:
 
     error = None
 
     with session.begin():
         action = action_repository.get_action_by_id(
-            session, action_id
+            session, action_id, user_id=user_id
         )
 
         if action is None:
@@ -622,7 +633,7 @@ def cancel_action(
             ):
                 raise RuntimeError("无法记录提案过期状态")
             audit_service.record_event(
-                session, "proposal_expired", action.task_id, action_id=action_id,
+                session, "proposal_expired", action.task_id, user_id=action.user_id, action_id=action_id,
                 from_status="pending", to_status="expired",
                 reason="提案超过确认期限",
             )
@@ -639,7 +650,7 @@ def cancel_action(
             error = unavailable_status_message(action.status, "取消")
         else:
             audit_service.record_event(
-                session, "proposal_cancelled", action.task_id, action_id=action_id,
+                session, "proposal_cancelled", action.task_id, user_id=action.user_id, action_id=action_id,
                 from_status="pending", to_status="cancelled",
             )
 

@@ -8,10 +8,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from backend.app.api.deps import current_user_id
 from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.config.settings import USER_TIMEZONE
-from backend.app.db.isolated import isolated_engine
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.db.session import get_db
 from backend.app.main import app
 from backend.app.models.conversation import ConversationMessageORM, ConversationORM
@@ -25,10 +26,10 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     async def test_injected_clock_and_session_factory_cover_full_turn(self) -> None:
@@ -66,6 +67,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
                 request_id=request_id,
                 session_factory=self.session_factory,
                 evaluation_now=evaluation_now,
+                user_id=self.user_id,
             )
 
         self.assertEqual(answer, "已创建学习Agent任务")
@@ -89,6 +91,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
                 yield session
 
         app.dependency_overrides[get_db] = isolated_db
+        app.dependency_overrides[current_user_id] = lambda: self.user_id
         try:
             with patch.object(chat_service, "SessionLocal", self.session_factory):
                 async with AsyncClient(
@@ -128,6 +131,8 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
                 content=reply,
             )
 
+        app.dependency_overrides[current_user_id] = lambda: self.user_id
+        self.addCleanup(app.dependency_overrides.clear)
         with (
             patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm),
             patch.object(chat_service, "SessionLocal", self.session_factory),

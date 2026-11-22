@@ -70,18 +70,96 @@ export type EventQuery = {
   category?: 'all' | 'failed' | 'cancelled'
 }
 
+export type CurrentUser = {
+  id: number
+  username: string
+  email: string | null
+  role: 'user' | 'admin'
+  must_change_password: boolean
+  created_at: string
+  /** 今日对话用量；limit 为 null 表示不限量（管理员）。 */
+  chat_usage?: { today: number; limit: number | null } | null
+}
+
+export type UserStatus = 'pending' | 'active' | 'rejected' | 'disabled'
+
+export type LoginSession = {
+  id: number
+  created_at: string
+  last_seen_at: string
+  ip: string | null
+  user_agent: string | null
+  current: boolean
+}
+
+export type OwnEvent = { id: number; event_type: string; ip: string | null; created_at: string }
+
+export type AdminUser = {
+  id: number
+  username: string
+  email: string | null
+  role: 'user' | 'admin'
+  status: UserStatus
+  must_change_password: boolean
+  created_at: string
+  last_login_at: string | null
+  reviewed_at: string | null
+  status_reason: string | null
+  daily_chat_limit: number | null
+  chat_limit: number | null
+  chat_today: number
+  chat_week: number
+  chat_days?: number[] | null
+}
+
+export type AdminUserPage = {
+  items: AdminUser[]
+  total: number
+  page: number
+  page_size: number
+  counts: Record<UserStatus | 'all', number>
+  chat_today: number
+  chat_week: number
+  default_chat_limit: number
+}
+
+export type AccountEvent = {
+  id: number
+  event_type: string
+  target_user_id: number
+  actor_user_id: number | null
+  target_username: string | null
+  actor_username: string | null
+  reason: string | null
+  details: Record<string, unknown> | null
+  created_at: string
+}
+
+export type AccountEventGroup = 'all' | 'review' | 'account' | 'login'
+
 const BASE = import.meta.env.VITE_API_BASE_URL || ''
 
 export class ApiError extends Error {
   readonly status: number
-  constructor(message: string, status: number) { super(message); this.status = status }
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// 会话失效（401）时的统一处理（跳转登录页）；由 main.ts 注册，避免这里直接依赖路由。
+let authErrorHandler: ((error: ApiError) => void) | null = null
+export function onAuthError(handler: (error: ApiError) => void) { authErrorHandler = handler }
+
+type RequestOptions = RequestInit & { /** 登录、获取当前用户等接口自己处理 401，不触发统一跳转。 */ handleAuthError?: boolean }
+
+async function request<T>(path: string, { handleAuthError = true, ...init }: RequestOptions = {}): Promise<T> {
   let response: Response
   try {
     response = await fetch(`${BASE}${path}`, {
       ...init,
+      // 会话令牌在 HttpOnly Cookie 中，由浏览器自动携带；前端代码读不到也不保存令牌。
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', ...init.headers },
     })
   } catch {
@@ -91,16 +169,63 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (response.status === 502 || response.status === 503) throw new Error('无法连接后端，请确认 FastAPI 已启动。')
     const body = await response.json().catch(() => null)
     const detail = body?.detail
-    const message = typeof detail === 'string'
-      ? detail
-      : Array.isArray(detail) ? detail.map((item: { msg?: string }) => item.msg).join('；') : null
-    throw new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status)
+    let message: string | null = null
+    if (typeof detail === 'string') message = detail
+    else if (Array.isArray(detail)) message = detail.map((item: { msg?: string }) => item.msg).join('；')
+    const error = new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status)
+    if (handleAuthError && response.status === 401) authErrorHandler?.(error)
+    throw error
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
 export const api = {
+  me: () => request<CurrentUser>('/auth/me', { handleAuthError: false }),
+  login: (account: string, password: string, remember: boolean) => request<CurrentUser>('/auth/login', {
+    method: 'POST', body: JSON.stringify({ account, password, remember }), handleAuthError: false,
+  }),
+  logout: () => request<void>('/auth/logout', { method: 'POST', handleAuthError: false }),
+  register: (username: string, password: string, email: string | null) => request<{ username: string; status: UserStatus }>('/auth/register', {
+    method: 'POST', body: JSON.stringify({ username, password, email }), handleAuthError: false,
+  }),
+  changeEmail: (email: string | null, currentPassword: string) => request<CurrentUser>('/auth/me', {
+    method: 'PATCH', body: JSON.stringify({ email, current_password: currentPassword }),
+  }),
+  sessions: () => request<LoginSession[]>('/auth/sessions'),
+  revokeSession: (id: number) => request<void>(`/auth/sessions/${id}`, { method: 'DELETE' }),
+  revokeOtherSessions: () => request<{ revoked: number }>('/auth/sessions/revoke-others', { method: 'POST' }),
+  ownEvents: () => request<OwnEvent[]>('/auth/events'),
+  adminUsers: (status: UserStatus | 'all', q: string, page = 1, pageSize = 100) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+    if (status !== 'all') params.set('status', status)
+    if (q.trim()) params.set('q', q.trim())
+    return request<AdminUserPage>(`/admin/users?${params}`)
+  },
+  adminUser: (id: number) => request<AdminUser>(`/admin/users/${id}`),
+  setChatLimit: (id: number, limit: number | null) => request<AdminUser>(`/admin/users/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ daily_chat_limit: limit }),
+  }),
+  pendingUserCount: () => request<{ count: number }>('/admin/users/pending-count'),
+  approveUser: (id: number) => request<AdminUser>(`/admin/users/${id}/approve`, { method: 'POST' }),
+  rejectUser: (id: number, reason: string) => request<AdminUser>(`/admin/users/${id}/reject`, {
+    method: 'POST', body: JSON.stringify({ reason: reason || null }),
+  }),
+  disableUser: (id: number, reason: string) => request<AdminUser>(`/admin/users/${id}/disable`, {
+    method: 'POST', body: JSON.stringify({ reason: reason || null }),
+  }),
+  enableUser: (id: number) => request<AdminUser>(`/admin/users/${id}/enable`, { method: 'POST' }),
+  resetUserPassword: (id: number) => request<{ temporary_password: string }>(`/admin/users/${id}/reset-password`, { method: 'POST' }),
+  deleteUser: (id: number) => request<void>(`/admin/users/${id}`, { method: 'DELETE' }),
+  accountEvents: ({ userId, group = 'all', beforeId, limit = 50 }: { userId?: number; group?: AccountEventGroup; beforeId?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams({ group, limit: String(limit) })
+    if (userId !== undefined) params.set('user_id', String(userId))
+    if (beforeId !== undefined) params.set('before_id', String(beforeId))
+    return request<AccountEvent[]>(`/admin/account-events?${params}`)
+  },
+  changePassword: (oldPassword: string, newPassword: string) => request<void>('/auth/password', {
+    method: 'POST', body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }), handleAuthError: false,
+  }),
   tasks: () => request<Task[]>('/tasks'),
   createTask: (input: TaskInput, key: string) => request<Task>('/tasks', {
     method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify(input),

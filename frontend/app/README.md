@@ -18,12 +18,16 @@ npm ci
 npm run dev
 ```
 
-访问 `http://127.0.0.1:5173/`。开发服务固定监听 IPv4 地址 `127.0.0.1` 和端口 `5173`；修改 Vite 配置后需停止旧进程并重新运行 `npm run dev`。Vite 在开发环境将 `/tasks`、`/chat`、`/actions`、`/audit` 代理到 `http://127.0.0.1:8000`。部署时可设置 `VITE_API_BASE_URL` 指向同源反向代理或允许跨域的 API 地址。
+访问 `http://127.0.0.1:5173/`。开发服务固定监听 IPv4 地址 `127.0.0.1` 和端口 `5173`；修改 Vite 配置后需停止旧进程并重新运行 `npm run dev`。Vite 在开发环境将 `/auth`、`/admin`、`/tasks`、`/chat`、`/actions`、`/audit` 代理到 `http://127.0.0.1:8000`。部署时可设置 `VITE_API_BASE_URL` 指向同源反向代理或允许跨域的 API 地址。
 
 在 Windows 上重新执行 `npm ci` 前，先停止正在运行的本项目前端开发服务器；Vite 加载的原生模块可能使依赖清理遇到 `EPERM`。日常启动无需重复执行 `npm ci`。
 
 ## 当前交互
 
+- 登录：除 `/login` 外的页面都需要登录，未登录时跳到 `/login?redirect=原地址`。登录态在 HttpOnly Cookie 中，前端代码不读写令牌；启动时调用 `GET /auth/me` 确认当前用户（`src/auth.ts`）。任意接口返回 401 时清空本地数据并回到登录页。注册入口提示"即将开放"，忘记密码提示联系管理员。
+- `/account/password` 修改密码；管理员重置密码后，改密前只能停留在这个页面。右上角头像菜单提供修改密码和退出登录。
+- 本地对话列表按用户分别保存在 `localStorage` 的 `liuhen.chats.<用户 ID>`，登出或切换账号时清空内存中的数据。
+- 开发代理：`/auth`、`/tasks` 等接口前缀与前端路由重名，浏览器直接打开页面（请求 HTML）时由前端处理，`fetch` 请求才转发到后端（`vite.config.ts`）。
 - 首页和对话把自然语言发送到 `POST /chat`。每轮生成 `request_id`；发送失败后重试会复用同一个 ID。
 - 对话页将助手回复按 Markdown 渲染（段落、列表、强调、链接、代码块等）；解析时禁用原始 HTML，再清理生成的 HTML 后显示。用户消息仍按原文展示。
 - 手动创建使用 `POST /tasks` 和 `Idempotency-Key`。同一表单内容重试沿用同一个键。

@@ -1,0 +1,13 @@
+# 换行符统一为 LF，写进仓库而不依赖各机器的 core.autocrlf 设置（本地 Windows 与云端 Linux 一致）。
+* text=auto eol=lf
+
+# 二进制文件不做换行符转换。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.pdf binary

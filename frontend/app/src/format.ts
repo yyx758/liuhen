@@ -21,10 +21,6 @@ export function displayDate(value: string | null) {
   const date = new Date(`${local.date}T12:00:00`)
   return `${date.getMonth() + 1}月${date.getDate()}日 · 周${'日一二三四五六'[date.getDay()]} ${local.time}`
 }
-export function inputDateTime(value: string | null) {
-  const local = localParts(value)
-  return local ? `${local.date}T${local.time}` : ''
-}
 export function toApiDateTime(value: string) { return value ? `${value}:00+08:00` : null }
 export function sortTasks(tasks: Task[]) {
   return [...tasks].sort((a, b) => (a.start_at || a.due_at || '').localeCompare(b.start_at || b.due_at || ''))
@@ -43,4 +39,39 @@ export function proposalChanges(action: Action) {
   return fields.filter(({ key }) => action.before[key] !== action.after?.[key]).map(({ key, label, format }) => ({
     label, before: format(action.before[key]), after: format(action.after![key]),
   }))
+}
+
+/** 账号相关时间：“3 分钟前”这类相对时间，超过 7 天显示日期。 */
+export function ago(value: string | null, now = Date.now()) {
+  if (!value) return '从未'
+  const diff = now - new Date(value).getTime()
+  const hour = 3600e3, day = 24 * hour
+  if (diff < hour) return `${Math.max(1, Math.round(diff / 60e3))} 分钟前`
+  if (diff < day) return `${Math.round(diff / hour)} 小时前`
+  if (diff < 7 * day) return `${Math.round(diff / day)} 天前`
+  const local = localParts(value)!
+  return `${Number(local.date.slice(5, 7))}月${Number(local.date.slice(8))}日`
+}
+
+/** 精确到分钟的时间，如 “11-21 15:30”。 */
+export function stamp(value: string) {
+  const local = localParts(value)!
+  return `${local.date.slice(5)} ${local.time}`
+}
+
+/** 把 User-Agent 粗略解析为“浏览器 / 系统”。 */
+export function deviceLabel(userAgent: string | null) {
+  if (!userAgent) return '未知设备'
+  const browsers: [RegExp, string][] = [[/Edg\//, 'Edge'], [/OPR\//, 'Opera'], [/Firefox\//, 'Firefox'], [/MicroMessenger/, '微信'], [/Chrome\//, 'Chrome'], [/Safari\//, 'Safari']]
+  const systems: [RegExp, string][] = [[/Windows/, 'Windows'], [/iPhone|iPad/, 'iOS'], [/Android/, 'Android'], [/Mac OS X/, 'macOS'], [/Linux/, 'Linux']]
+  const browser = browsers.find(([pattern]) => pattern.test(userAgent))?.[1] ?? '其他浏览器'
+  const system = systems.find(([pattern]) => pattern.test(userAgent))?.[1] ?? '其他系统'
+  return `${browser} / ${system}`
+}
+
+export const ACCOUNT_EVENT_LABELS: Record<string, string> = {
+  user_registered: '提交注册', user_approved: '审核通过', user_rejected: '拒绝注册', user_disabled: '停用账号',
+  user_enabled: '启用账号', user_deleted: '删除账号', password_reset: '重置密码', password_changed: '修改密码',
+  email_changed: '修改邮箱', role_changed: '角色变更', chat_limit_changed: '调整对话上限',
+  login_succeeded: '登录成功', login_failed: '登录失败', login_locked: '登录锁定', session_revoked: '下线设备',
 }

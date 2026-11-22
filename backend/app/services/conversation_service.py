@@ -4,7 +4,6 @@ import json
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -29,19 +28,6 @@ def normalize_message(message: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(422, "会话消息不合法") from exc
 
 
-def create_conversation(session: Session) -> str:
-    conversation_id = str(uuid4())
-    now = now_timestamp()
-    with session.begin():
-        session.add(ConversationORM(
-            id=conversation_id,
-            created_at=now,
-            updated_at=now,
-            message_count=0,
-        ))
-    return conversation_id
-
-
 def load_history(session: Session, conversation_id: str) -> ConversationRead:
     conversation = session.get(ConversationORM, conversation_id)
     if conversation is None:
@@ -59,7 +45,7 @@ def load_history(session: Session, conversation_id: str) -> ConversationRead:
     )
 
 
-def delete_conversation(session: Session, conversation_id: str) -> None:
+def delete_conversation(session: Session, conversation_id: str, *, user_id: int) -> None:
     """Remove chat content; keep only request IDs needed to reject replay."""
     with session.begin():
         # acquire_turn takes this lock before starting another turn.
@@ -72,7 +58,7 @@ def delete_conversation(session: Session, conversation_id: str) -> None:
             ConversationORM, conversation_id,
             with_for_update=True,
         )
-        if conversation is None:
+        if conversation is None or conversation.user_id != user_id:
             raise HTTPException(404, "会话不存在")
         active = session.scalar(
             select(ChatTurnORM.request_id).where(
@@ -83,13 +69,17 @@ def delete_conversation(session: Session, conversation_id: str) -> None:
         if active is not None:
             raise HTTPException(409, "会话正在处理消息，请稍后删除")
 
-        request_ids = session.scalars(
-            select(ChatTurnORM.request_id).where(ChatTurnORM.conversation_id == conversation_id)
+        turns = session.execute(
+            select(ChatTurnORM.request_id, ChatTurnORM.created_at)
+            .where(ChatTurnORM.conversation_id == conversation_id)
         ).all()
         deleted_at = now_timestamp()
+        # 保留每轮的创建时间：删除会话后这些轮次仍计入每日用量。
         session.add_all(
-            DeletedChatRequestORM(request_id=request_id, deleted_at=deleted_at)
-            for request_id in request_ids
+            DeletedChatRequestORM(
+                request_id=request_id, user_id=user_id, deleted_at=deleted_at, turn_created_at=created_at,
+            )
+            for request_id, created_at in turns
         )
         session.execute(delete(ChatTurnORM).where(ChatTurnORM.conversation_id == conversation_id))
         session.execute(delete(ConversationMessageORM).where(

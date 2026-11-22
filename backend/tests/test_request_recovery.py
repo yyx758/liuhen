@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.app.agent import agent_runner
 from backend.app.agent.llm import LLMResult
 from backend.app.agent.tool_registry import ToolRegistry
-from backend.app.db.isolated import isolated_engine
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.models.conversation import ConversationORM
 from backend.app.models.operation_event import OperationEventORM
 from backend.app.models.request import ChatTurnORM
@@ -21,23 +21,30 @@ from backend.app.schemas.task import TaskCreate
 from backend.app.services import chat_service, chat_turn_service, conversation_service, task_service
 
 
+def add_conversation(session_factory, user_id: int) -> str:
+    conversation_id = str(uuid4())
+    with session_factory() as session, session.begin():
+        session.add(ConversationORM(id=conversation_id, created_at=0, updated_at=0, message_count=0, user_id=user_id))
+    return conversation_id
+
+
 class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
         self.session_factory = sessionmaker(bind=self.engine)
 
     def tearDown(self) -> None:
-        self.engine.dispose()
         self.database.__exit__(None, None, None)
 
     def test_direct_create_request_is_idempotent(self) -> None:
         request_id = str(uuid4())
         data = TaskCreate(title="学习 Python", start_at="2030-01-02T14:00:00+08:00")
         with Session(self.engine) as session:
-            first = task_service.create_task(data, session, request_id)
+            first = task_service.create_task(data, session, request_id, user_id=self.user_id)
         with Session(self.engine) as session:
-            second = task_service.create_task(data, session, request_id)
+            second = task_service.create_task(data, session, request_id, user_id=self.user_id)
         self.assertEqual(first, second)
         with Session(self.engine) as session:
             self.assertEqual(len(session.scalars(select(TaskORM)).all()), 1)
@@ -45,6 +52,7 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
             task_service.create_task(
                 TaskCreate(title="不同内容", start_at="2030-01-03T14:00:00+08:00"),
                 session, request_id,
+                user_id=self.user_id,
             )
         self.assertEqual(raised.exception.status_code, 409)
 
@@ -58,6 +66,7 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 result = task_service.create_task(
                     TaskCreate(title="并发重试", start_at="2030-01-04T14:00:00+08:00"),
                     session, request_id,
+                    user_id=self.user_id,
                 )
                 return result.id
 
@@ -68,28 +77,24 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(session.scalars(select(TaskORM)).all()), 1)
 
     def test_same_conversation_is_claimed_before_model_call(self) -> None:
-        with Session(self.engine) as session:
-            conversation_id = conversation_service.create_conversation(session)
         first = chat_turn_service.acquire_turn(
-            str(uuid4()), "第一轮", conversation_id, self.session_factory
+            str(uuid4()), "第一轮", None, self.session_factory, user_id=self.user_id
         )
         with self.assertRaises(HTTPException) as raised:
             chat_turn_service.acquire_turn(
-                str(uuid4()), "第二轮", conversation_id, self.session_factory
+                str(uuid4()), "第二轮", first.conversation_id, self.session_factory, user_id=self.user_id
             )
         self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(first.conversation_id, conversation_id)
 
     def test_concurrent_claim_has_one_winner(self) -> None:
-        with Session(self.engine) as session:
-            conversation_id = conversation_service.create_conversation(session)
+        conversation_id = add_conversation(self.session_factory, self.user_id)
         barrier = Barrier(2)
 
         def claim() -> str:
             barrier.wait()
             try:
                 chat_turn_service.acquire_turn(
-                    str(uuid4()), "新消息", conversation_id, self.session_factory
+                    str(uuid4()), "新消息", conversation_id, self.session_factory, user_id=self.user_id
                 )
                 return "claimed"
             except HTTPException as exc:
@@ -105,7 +110,7 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def test_tool_result_failure_rolls_back_task(self) -> None:
         request_id = str(uuid4())
         turn = chat_turn_service.acquire_turn(
-            request_id, "创建学习任务", None, self.session_factory
+            request_id, "创建学习任务", None, self.session_factory, user_id=self.user_id
         )
         arguments = json.dumps({
             "title": "学习 Python", "start_at": "2030-01-02T14:00:00+08:00",
@@ -171,7 +176,7 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm),
         ):
             with self.assertRaises(RuntimeError):
-                await chat_service.send_message("明天下午学习 Python", request_id=request_id)
+                await chat_service.send_message("明天下午学习 Python", request_id=request_id, user_id=self.user_id)
 
             with Session(self.engine) as session:
                 turn = session.get(ChatTurnORM, request_id)
@@ -184,10 +189,10 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(audit.tool_call_id, call["id"])
 
             conversation_id, answer = await chat_service.send_message(
-                "明天下午学习 Python", request_id=request_id
+                "明天下午学习 Python", request_id=request_id, user_id=self.user_id
             )
             again = await chat_service.send_message(
-                "明天下午学习 Python", request_id=request_id
+                "明天下午学习 Python", request_id=request_id, user_id=self.user_id
             )
 
         self.assertEqual(answer, "任务已创建")
@@ -242,12 +247,12 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with patch.object(chat_turn_service, "execute_tool", side_effect=commit_then_interrupt):
                 with self.assertRaises(RuntimeError):
-                    await chat_service.send_message("创建任务", request_id=request_id)
+                    await chat_service.send_message("创建任务", request_id=request_id, user_id=self.user_id)
             with Session(self.engine) as session:
                 self.assertEqual(len(session.scalars(select(TaskORM)).all()), 1)
                 self.assertEqual(session.get(ChatTurnORM, request_id).messages[-1]["role"], "tool")
 
-            _, answer = await chat_service.send_message("创建任务", request_id=request_id)
+            _, answer = await chat_service.send_message("创建任务", request_id=request_id, user_id=self.user_id)
 
         self.assertEqual(answer, "已创建")
         self.assertEqual(model_calls, 2)
@@ -272,13 +277,13 @@ class RequestRecoveryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with patch.object(conversation_service, "append_messages", side_effect=RuntimeError("保存失败")):
                 with self.assertRaises(RuntimeError):
-                    await chat_service.send_message("你好", request_id=request_id)
+                    await chat_service.send_message("你好", request_id=request_id, user_id=self.user_id)
             with Session(self.engine) as session:
                 turn = session.get(ChatTurnORM, request_id)
                 self.assertEqual(turn.messages[-1]["content"], "收到")
                 self.assertEqual(session.get(ConversationORM, turn.conversation_id).message_count, 0)
 
-            conversation_id, answer = await chat_service.send_message("你好", request_id=request_id)
+            conversation_id, answer = await chat_service.send_message("你好", request_id=request_id, user_id=self.user_id)
 
         self.assertEqual(answer, "收到")
         self.assertEqual(calls, 1)

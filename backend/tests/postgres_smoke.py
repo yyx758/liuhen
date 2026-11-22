@@ -9,43 +9,27 @@ from threading import Barrier
 from unittest.mock import patch
 from uuid import uuid4
 
-import psycopg
-from psycopg import sql
 from fastapi import HTTPException
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.engine import make_url
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.db.base import Base
+from backend.app.api.deps import current_user_id
+from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.db.session import get_db
-from backend.app.db.session import DATABASE_URL
 from backend.app.api import tasks as tasks_api
-from backend.app.models import action, conversation, operation_event, request, task  # noqa: F401
 from backend.app.models.action import PendingActionORM
+from backend.app.models.conversation import ConversationORM
 from backend.app.models.task import TaskORM
 from backend.app.repositories import task_repository
 from backend.app.schemas.task import TaskCreate, TaskUpdate
-from backend.app.services import action_service, chat_turn_service, conversation_service, task_service
+from backend.app.services import action_service, chat_turn_service, task_service
 
 
 def run() -> None:
-    url = make_url(DATABASE_URL)
-    if url.get_backend_name() != "postgresql":
-        raise RuntimeError(".env 的 database_url 必须指向 PostgreSQL")
-
-    test_name = f"liuhen_test_{uuid4().hex[:12]}"
-    admin = psycopg.connect(
-        host=url.host, port=url.port, user=url.username,
-        password=url.password, dbname="postgres", autocommit=True,
-    )
-    engine = None
-    try:
-        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(test_name)))
-        engine = create_engine(url.set(database=test_name))
-        Base.metadata.create_all(engine)
-
+    with isolated_engine() as engine:
+        user_id = create_user(engine, "smoke")
         request_id = str(uuid4())
         data = TaskCreate(
             title="PostgreSQL 测试任务",
@@ -54,9 +38,9 @@ def run() -> None:
             due_at="2030-01-03T12:00:00+08:00",
         )
         with Session(engine) as session:
-            created = task_service.create_task(data, session, request_id)
+            created = task_service.create_task(data, session, request_id, user_id=user_id)
         with Session(engine) as session:
-            repeated = task_service.create_task(data, session, request_id)
+            repeated = task_service.create_task(data, session, request_id, user_id=user_id)
             assert repeated.id == created.id
             assert repeated.due_at == created.due_at
 
@@ -70,7 +54,7 @@ def run() -> None:
                     title="并发重试任务",
                     start_at="2030-03-02T14:00:00+08:00",
                     duration_minutes=60,
-                ), session, retry_key).id
+                ), session, retry_key, user_id=user_id).id
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             retry_ids = list(pool.map(concurrent_retry, (1, 2)))
@@ -81,7 +65,7 @@ def run() -> None:
                 task_service.create_task(TaskCreate(
                     title="冲突任务", start_at="2030-01-02T14:30:00+08:00",
                     duration_minutes=30,
-                ), session)
+                ), session, user_id=user_id)
             except HTTPException as exc:
                 assert exc.status_code == 409
             else:
@@ -89,17 +73,17 @@ def run() -> None:
 
         with Session(engine) as session:
             proposal = action_service.propose_update(
-                session, created.id, TaskUpdate(title="已确认的测试任务")
+                session, created.id, TaskUpdate(title="已确认的测试任务"), user_id=user_id
             )
         with Session(engine) as session:
-            confirmed = action_service.confirm_action(session, proposal.id)
+            confirmed = action_service.confirm_action(session, proposal.id, user_id=user_id)
             assert confirmed.status == "executed"
 
         barrier = Barrier(2)
         original_find = task_repository.find_overlapping_task
 
-        def synchronized_find(session, start_at, end_at, exclude_task_id=None):
-            found = original_find(session, start_at, end_at, exclude_task_id)
+        def synchronized_find(session, start_at, end_at, exclude_task_id=None, *, user_id):
+            found = original_find(session, start_at, end_at, exclude_task_id, user_id=user_id)
             if start_at.year == 2031:
                 barrier.wait(timeout=10)
             return found
@@ -111,7 +95,7 @@ def run() -> None:
                         title=f"并发任务 {index}",
                         start_at="2031-01-02T14:00:00+08:00",
                         duration_minutes=60,
-                    ), session)
+                    ), session, user_id=user_id)
                     return 201
                 except HTTPException as exc:
                     return exc.status_code
@@ -128,19 +112,20 @@ def run() -> None:
                     title=f"待改期任务 {index}",
                     start_at=f"2032-02-02T{hour:02d}:00:00+08:00",
                     duration_minutes=60,
-                ), session)
+                ), session, user_id=user_id)
             with Session(engine) as session:
                 proposal = action_service.propose_update(
                     session, source_task.id,
                     TaskUpdate(start_at="2032-02-02T14:00:00+08:00"),
+                    user_id=user_id,
                 )
                 proposals.append(proposal.id)
 
         confirm_barrier = Barrier(2)
         original_conflict = action_service.find_schedule_conflict
 
-        def synchronized_conflict(session, task_id, candidate):
-            found = original_conflict(session, task_id, candidate)
+        def synchronized_conflict(session, task_id, candidate, *, user_id):
+            found = original_conflict(session, task_id, candidate, user_id=user_id)
             if candidate.start_at is not None and candidate.start_at.year == 2032:
                 confirm_barrier.wait(timeout=10)
             return found
@@ -148,7 +133,7 @@ def run() -> None:
         def concurrent_confirm(action_id: int) -> str:
             with Session(engine) as session:
                 try:
-                    return action_service.confirm_action(session, action_id).status
+                    return action_service.confirm_action(session, action_id, user_id=user_id).status
                 except HTTPException as exc:
                     assert exc.status_code == 409
                     return "conflicted"
@@ -162,7 +147,7 @@ def run() -> None:
             proposal_task = task_service.create_task(TaskCreate(
                 title="并发提案任务",
                 start_at="2033-02-02T09:00:00+08:00",
-            ), session)
+            ), session, user_id=user_id)
         proposal_barrier = Barrier(2)
 
         def concurrent_propose(index: int) -> int:
@@ -171,6 +156,7 @@ def run() -> None:
                 return action_service.propose_update(
                     session, proposal_task.id,
                     TaskUpdate(title=f"提案标题 {index}"),
+                    user_id=user_id,
                 ).id
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -178,8 +164,12 @@ def run() -> None:
         assert proposal_ids[0] != proposal_ids[1]
 
         factory = sessionmaker(bind=engine)
-        with factory() as session:
-            conversation_id = conversation_service.create_conversation(session)
+        conversation_id = str(uuid4())
+        with factory() as session, session.begin():
+            session.add(ConversationORM(
+                id=conversation_id, created_at=0, updated_at=0, message_count=0,
+                user_id=user_id,
+            ))
         turn_barrier = Barrier(2)
 
         def concurrent_turn(_: int) -> int:
@@ -187,6 +177,7 @@ def run() -> None:
             try:
                 chat_turn_service.acquire_turn(
                     str(uuid4()), "测试并发对话", conversation_id, factory,
+                    user_id=user_id,
                 )
                 return 201
             except HTTPException as exc:
@@ -204,6 +195,7 @@ def run() -> None:
                 yield session
 
         api.dependency_overrides[get_db] = test_db
+        api.dependency_overrides[current_user_id] = lambda: user_id
         with TestClient(api) as client:
             response = client.post("/tasks", headers={"Idempotency-Key": str(uuid4())}, json={
                 "title": "HTTP 测试任务",
@@ -222,12 +214,5 @@ def run() -> None:
             )))
             assert sorted(statuses) == ["pending", "replaced"], statuses
         print("PostgreSQL smoke test passed: HTTP, read/write, idempotency, time, proposal, concurrent create/confirm/propose/chat")
-    finally:
-        if engine is not None:
-            engine.dispose()
-        admin.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(test_name)))
-        admin.close()
-
-
 if __name__ == "__main__":
     run()

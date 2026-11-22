@@ -43,19 +43,23 @@ class UpdateProposalArguments(TaskIdArguments):
     )
 
 
-def list_tasks(_: EmptyArguments, session: Session):
-    return task_service.list_tasks(session)
+def create_task(data: TaskCreate, session: Session, *, user_id: int):
+    return task_service.create_task(data, session, user_id=user_id)
 
 
-def get_task(data: TaskIdArguments, session: Session):
-    return task_service.get_task(data.task_id, session)
+def list_tasks(_: EmptyArguments, session: Session, *, user_id: int):
+    return task_service.list_tasks(session, user_id=user_id)
 
 
-def get_action(data: ActionIdArguments, session: Session):
-    return action_service.get_action(session, data.action_id)
+def get_task(data: TaskIdArguments, session: Session, *, user_id: int):
+    return task_service.get_task(data.task_id, session, user_id=user_id)
 
 
-def propose_update(data: UpdateProposalArguments, session: Session):
+def get_action(data: ActionIdArguments, session: Session, *, user_id: int):
+    return action_service.get_action(session, data.action_id, user_id=user_id)
+
+
+def propose_update(data: UpdateProposalArguments, session: Session, *, user_id: int):
     changes = data.changes.model_dump(exclude_unset=True)
     groups = [
         {name: changes[name] for name in fields if name in changes}
@@ -67,7 +71,7 @@ def propose_update(data: UpdateProposalArguments, session: Session):
     ]
     groups = [group for group in groups if group]
     if len(groups) <= 1:
-        return action_service.propose_update(session, data.task_id, data.changes)
+        return action_service.propose_update(session, data.task_id, data.changes, user_id=user_id)
 
     owns_transaction = not session.info.get("chat_tool_transaction")
     with session.begin() if owns_transaction else nullcontext():
@@ -79,7 +83,7 @@ def propose_update(data: UpdateProposalArguments, session: Session):
             session.info["chat_tool_transaction"] = True
         try:
             return [
-                action_service.propose_update(session, data.task_id, TaskUpdate(**group))
+                action_service.propose_update(session, data.task_id, TaskUpdate(**group), user_id=user_id)
                 for group in groups
             ]
         finally:
@@ -91,8 +95,8 @@ def propose_update(data: UpdateProposalArguments, session: Session):
                 session.info.pop("chat_tool_transaction", None)
 
 
-def propose_delete(data: TaskIdArguments, session: Session):
-    return action_service.propose_delete(session, data.task_id)
+def propose_delete(data: TaskIdArguments, session: Session, *, user_id: int):
+    return action_service.propose_delete(session, data.task_id, user_id=user_id)
 
 
 def format_time(value: datetime | None) -> str:
@@ -157,12 +161,13 @@ def format_proposals(result_json: str) -> str:
 
 class ToolRegistry:
     def __init__(self):
-        # 所有 handler 都接受 (已校验参数, Session)，终止回复由工具自己的配置提供。
+        # 所有 handler 都接受 (已校验参数, Session, *, user_id)，终止回复由工具自己的配置提供。
+        # user_id 由调用方从会话归属得到，不出现在工具参数 schema 里，模型无法指定。
         self.tools = {
             "create_task": {
                 "description": "创建待办任务。至少提供开始时间或截止时间之一。截止时间是任务期限；开始时间和可选时长是独立的日程安排，未指定时长时保持为空。只有开始时间加时长形成的时间段参与冲突检查；无需用户说明时区。",
                 "schema": TaskCreate,
-                "handler": task_service.create_task,
+                "handler": create_task,
             },
             "list_tasks": {
                 "description": "列出所有待办，供回答查询或定位修改、删除的目标任务。无参数。",
@@ -212,11 +217,11 @@ class ToolRegistry:
     def terminal_reply(self, name: str, result_json: str) -> str:
         return self.tools[name]["terminal_reply"](result_json)
 
-    def execute_tool(self, name: str, parameters: str, session: Session) -> str:
+    def execute_tool(self, name: str, parameters: str, session: Session, *, user_id: int) -> str:
         entry = self.tools.get(name)
         if entry is None:
             raise ValueError("工具不存在")
 
         data = entry["schema"].model_validate_json(parameters)
-        result = entry["handler"](data, session)
+        result = entry["handler"](data, session, user_id=user_id)
         return TypeAdapter(Any).dump_json(result).decode("utf-8")
