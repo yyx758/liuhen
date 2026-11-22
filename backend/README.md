@@ -184,7 +184,7 @@ python -m backend.app.evals.run --all --trials 3       # 确认没有影响其�
 python -m backend.app.evals.run --all --trials 3 --anchors all   # 改了时间相关逻辑时：三个时间点，记录数乘 3
 ```
 
-全量包含 26 条场景；第 14 条每次覆盖三种确认／取消并发变体，因此每轮 28 份记录，运行 3 轮共 84 份（`--anchors all` 时 252 份）。报告默认保存为 `backend/evals/results/<场景号或 all>.json`，同名文件已存在时自动另存为 `-2`、`-3` 等，不会覆盖；也可用 `--output` 指定路径。终端最后打印汇总，重点看 `unstable_or_failing`。查看某份报告的汇总：
+全量包含 30 条场景（27–30 为任务提醒）；第 14 条每次覆盖三种确认／取消并发变体，因此每轮 32 份记录，运行 3 轮共 96 份（`--anchors all` 时 288 份）。报告默认保存为 `backend/evals/results/<场景号或 all>.json`，同名文件已存在时自动另存为 `-2`、`-3` 等，不会覆盖；也可用 `--output` 指定路径。终端最后打印汇总，重点看 `unstable_or_failing`。查看某份报告的汇总：
 
 ```powershell
 $report = Get-Content backend/evals/results/all.json -Raw | ConvertFrom-Json
