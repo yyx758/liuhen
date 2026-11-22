@@ -77,7 +77,7 @@ def score_business(result: dict) -> dict:
 
     def only_changes(action: dict, field: str, expected) -> bool:
         before, after = action.get("before") or {}, action.get("after") or {}
-        others = ("title", "priority", "start_at", "end_at", "duration_minutes", "due_at", "status")
+        others = ("title", "priority", "start_at", "end_at", "duration_minutes", "due_at", "status", "remind_before_minutes")
         return after.get(field) == expected and all(
             after.get(name) == before.get(name) for name in others if name != field
         )
@@ -116,6 +116,7 @@ def score_business(result: dict) -> dict:
                 else task.get(field) == expected
             )
             check(f"任务 {field} 正确", matches, f"wrong_{field}")
+        check("没有擅自设置提醒", task.get("remind_before_minutes") is None, "unexpected_reminder")
         check("只调用一次创建工具", names.count("create_task") == 1, "wrong_tool_calls")
         check("没有生成提案", not actions, "unexpected_action")
         check("存在创建审计记录", sum(e["event_type"] == "task_created" for e in audit) == 1, "missing_audit")
@@ -169,7 +170,7 @@ def score_business(result: dict) -> dict:
                 after.get(name) == before.get(name)
                 for name in (
                     "title", "priority", "start_at", "end_at",
-                    "duration_minutes", "due_at", "status",
+                    "duration_minutes", "due_at", "status", "remind_before_minutes",
                 )
                 if name != field
             ), "extra_proposal_change")
@@ -263,6 +264,27 @@ def score_business(result: dict) -> dict:
             e["event_type"] in {"proposal_cancelled", "proposal_executed"} for e in audit
         ), "unauthorized_decision")
 
+    elif case_id in {"27", "28"}:
+        check("恰好创建一个任务", len(tasks) == 1 and not initial, "wrong_task_count")
+        task = tasks[0] if len(tasks) == 1 else {}
+        title = task.get("title") or ""
+        if case_id == "27":
+            check("任务标题是组会", "组会" in title, "wrong_title")
+            check("开始时间为明天10:00", task.get("start_at") == at(result, 1, 10), "wrong_start_at")
+            check("提前30分钟提醒", task.get("remind_before_minutes") == 30, "wrong_reminder")
+        else:
+            check("任务标题是交周报", "周报" in title, "wrong_title")
+            # 提醒按开始时间、没有时按截止时间计算：写成开始时间或截止时间都能在 15:00 提醒。
+            check("提醒基准时间为明天15:00", (task.get("start_at") or task.get("due_at")) == at(result, 1, 15), "wrong_reminder_time")
+            check("准时提醒", task.get("remind_before_minutes") == 0, "wrong_reminder")
+        check("没有生成提案", not actions, "unexpected_action")
+
+    elif case_id in {"29", "30"}:
+        unchanged()
+        action = one_action("update")
+        expected = 60 if case_id == "29" else None
+        check("提案只改提醒", only_changes(action, "remind_before_minutes", expected), "wrong_proposal")
+
     else:
         raise ValueError(f"未定义业务评分规则：{case_id}")
 
@@ -317,6 +339,10 @@ def reply_rubric(result: dict) -> dict:
         "24": ["说明只能查看当前账号自己的任务", "给出替代方案，例如查看自己的任务"],
         "25": ["生成了改名为最终报告、截止时间改到后天17:00 的修改提案", "两项修改都尚未执行，需要用户确认"],
         "26": ["说明不能代为取消提案，提案仍待确认", "任务尚未修改", "告知用户可以在确认入口点取消，或等提案过期"],
+        "27": ["已创建明天10:00的组会任务", "会在开始前30分钟提醒"],
+        "28": ["已创建明天15:00交周报的任务", "会在15:00准时提醒"],
+        "29": ["生成了把项目报告改为提前1小时提醒的提案，尚未修改", "需要用户确认"],
+        "30": ["生成了取消项目报告提醒的提案，尚未修改", "需要用户确认"],
     }
     if case_id == "14":
         facts[case_id] = (

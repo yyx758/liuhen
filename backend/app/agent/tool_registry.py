@@ -39,7 +39,7 @@ class ActionIdArguments(BaseModel):
 
 class UpdateProposalArguments(TaskIdArguments):
     changes: TaskUpdate = Field(
-        description="要修改的任务字段：标题、优先级、开始时间、结束时间、时长、截止时间或状态"
+        description="要修改的任务字段：标题、优先级、开始时间、结束时间、时长、截止时间、状态或提前提醒分钟数"
     )
 
 
@@ -66,7 +66,7 @@ def propose_update(data: UpdateProposalArguments, session: Session, *, user_id: 
         for fields in (
             ("title",), ("priority",),
             ("start_at", "end_at", "duration_minutes"),
-            ("due_at",), ("status",),
+            ("due_at",), ("status",), ("remind_before_minutes",),
         )
     ]
     groups = [group for group in groups if group]
@@ -105,6 +105,18 @@ def format_time(value: datetime | None) -> str:
     return value.astimezone(USER_TIMEZONE).strftime("%Y-%m-%d %H:%M")
 
 
+def format_reminder(minutes: int | None) -> str:
+    if minutes is None:
+        return "不提醒"
+    if minutes == 0:
+        return "准时提醒"
+    if minutes % 1440 == 0:
+        return f"提前 {minutes // 1440} 天"
+    if minutes % 60 == 0:
+        return f"提前 {minutes // 60} 小时"
+    return f"提前 {minutes} 分钟"
+
+
 def format_proposal(result_json: str) -> str:
     """只使用服务端保存的提案快照生成给用户看的操作内容。"""
     action = PendingAction.model_validate_json(result_json)
@@ -131,6 +143,7 @@ def format_proposal(result_json: str) -> str:
         "duration_minutes": "时长",
         "due_at": "截止时间",
         "status": "状态",
+        "remind_before_minutes": "提醒",
     }
     changes = []
     for field, label in labels.items():
@@ -142,6 +155,8 @@ def format_proposal(result_json: str) -> str:
             elif field == "duration_minutes":
                 before = f"{before} 分钟" if before is not None else "无"
                 after = f"{after} 分钟" if after is not None else "无"
+            elif field == "remind_before_minutes":
+                before, after = format_reminder(before), format_reminder(after)
             changes.append(f"{label}：{before or '无'} → {after or '无'}")
 
     return (
@@ -165,7 +180,7 @@ class ToolRegistry:
         # user_id 由调用方从会话归属得到，不出现在工具参数 schema 里，模型无法指定。
         self.tools = {
             "create_task": {
-                "description": "创建待办任务。至少提供开始时间或截止时间之一。截止时间是任务期限；开始时间和可选时长是独立的日程安排，未指定时长时保持为空。只有开始时间加时长形成的时间段参与冲突检查；无需用户说明时区。",
+                "description": "创建待办任务。至少提供开始时间或截止时间之一。截止时间是任务期限；开始时间和可选时长是独立的日程安排，未指定时长时保持为空。只有开始时间加时长形成的时间段参与冲突检查；无需用户说明时区。用户要求提醒时设置 remind_before_minutes（提前多少分钟，0 为准时），没有要求提醒时不要设置。",
                 "schema": TaskCreate,
                 "handler": create_task,
             },
@@ -185,7 +200,7 @@ class ToolRegistry:
                 "handler": get_action,
             },
             "propose_update": {
-                "description": "为已定位的任务创建修改提案，不立即修改。changes 可修改标题、优先级、开始时间、结束时间、时长、截止时间和状态；独立修改会拆成分别确认的提案，开始时间、结束时间和时长作为一组。时间字段必须相互一致，确认时再次检查冲突。",
+                "description": "为已定位的任务创建修改提案，不立即修改。changes 可修改标题、优先级、开始时间、结束时间、时长、截止时间、状态和提前提醒分钟数（null 为取消提醒）；独立修改会拆成分别确认的提案，开始时间、结束时间和时长作为一组。时间字段必须相互一致，确认时再次检查冲突。",
                 "schema": UpdateProposalArguments,
                 "handler": propose_update,
                 "terminal_reply": format_proposals,
