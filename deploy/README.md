@@ -33,6 +33,7 @@
 - 公开入口：`https://liuhen.yyyyx.top/`，显示项目简介和 ICP 备案号。`/app/` 进入应用，未登录时跳转到登录页；新用户在登录页点"注册"提交申请，管理员在"管理"页面审核通过后才能登录。
 - 管理员忘记密码：`docker compose -f deploy/compose.yaml run --rm api python -m backend.app.cli reset-password --username <名字>`，临时密码只显示一次。
 - 该配置只服务 `liuhen.yyyyx.top`，不处理根域名和 `www`。
+- 上线前检查：后端测试通过；本次上线若包含影响 Agent 行为的改动（提示词、Agent 循环、工具、模型等，范围见根目录 `CLAUDE.md`"测试与验证"），全量测评须达到 `docs/项目进度.md` 中的最新基线。
 - 更新：服务器上的代码不是 Git 仓库，用 `git archive` 上传已推送的 `main`。先解压到新目录并复制 `deploy/secrets/`、`backups/`，构建镜像（构建期间旧容器照常运行），停服务后再对调目录，旧目录保留到确认无误（下次更新前先删掉上一次留下的 `/opt/liuhen.old`）：
   ```bash
   # 本地执行：git archive --format=tar main | ssh <服务器> 'sudo mkdir /opt/liuhen.new && sudo chown ubuntu:ubuntu /opt/liuhen.new && tar -xf - -C /opt/liuhen.new'
