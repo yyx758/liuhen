@@ -82,3 +82,5 @@ class FailureLock:
 login_ip_limiter = SlidingWindowLimiter(limit=10, window_seconds=60)
 login_failure_lock = FailureLock(max_failures=5, lock_seconds=15 * 60)
 register_ip_limiter = SlidingWindowLimiter(limit=5, window_seconds=3600)
+# 获取邮箱验证码：同一 IP 每小时 10 次（邮箱验证 PRD E5）。按邮箱的冷却与每小时上限在数据库里统计。
+email_code_ip_limiter = SlidingWindowLimiter(limit=10, window_seconds=3600)

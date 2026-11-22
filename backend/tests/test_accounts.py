@@ -16,7 +16,10 @@ from backend.app.models.account_event import AccountEventORM
 from backend.app.models.user import UserORM
 from backend.app.services import account_service
 from backend.app.services.auth_service import hash_password
-from backend.app.services.rate_limit import login_failure_lock, login_ip_limiter, register_ip_limiter
+from backend.app.services.rate_limit import (
+    email_code_ip_limiter, login_failure_lock, login_ip_limiter, register_ip_limiter,
+)
+from backend.tests.mail_helpers import install_outbox
 
 ORIGIN = "http://127.0.0.1:5173"
 PASSWORD = "correct-horse-1"
@@ -26,8 +29,9 @@ class AccountTests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = isolated_engine()
         self.engine = self.database.__enter__()
-        for limiter in (login_ip_limiter, login_failure_lock, register_ip_limiter):
+        for limiter in (login_ip_limiter, login_failure_lock, register_ip_limiter, email_code_ip_limiter):
             limiter.reset()
+        self.outbox = install_outbox(self)
 
         def test_db():
             with Session(self.engine) as session:
@@ -68,8 +72,17 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return client
 
-    def register(self, username: str, email: str | None = None, password: str = PASSWORD):
-        return self.new_client().post("/auth/register", json={"username": username, "password": password, "email": email})
+    def register(self, username: str, email: str | None = None, password: str = PASSWORD, code: str | None = None):
+        """注册；不传 code 时先获取验证码。不传 email 时用 <用户名>@example.com。"""
+        client = self.new_client()
+        email = email if email is not None else f"{username.lower()}@example.com"
+        if code is None:
+            sent = client.post("/auth/register/email-code", json={"email": email})
+            self.assertEqual(sent.status_code, 200, sent.text)
+            code = self.outbox.last_code()
+        return client.post(
+            "/auth/register", json={"username": username, "password": password, "email": email, "code": code},
+        )
 
     def user_id(self, username: str) -> int:
         with Session(self.engine) as session:
@@ -117,7 +130,8 @@ class AccountTests(unittest.TestCase):
         )
         for kwargs, code, message in cases:
             with self.subTest(kwargs=kwargs):
-                response = self.register(**kwargs)
+                # 这些错误都在校验验证码之前返回，随便填一个验证码即可。
+                response = self.register(**kwargs, code="123456")
                 self.assertEqual((response.status_code, response.json()["detail"]), (code, message))
 
     def test_register_rate_limit_per_ip(self) -> None:
@@ -133,7 +147,8 @@ class AccountTests(unittest.TestCase):
 
         self.assertEqual(self.admin.delete(f"/admin/users/{user_id}").status_code, 204)
         self.assertIsNone(self.user_id("spammer"))
-        self.assertEqual(self.register("spammer").status_code, 201)
+        # 换一个邮箱：同一邮箱 60 秒内不能再次获取验证码。
+        self.assertEqual(self.register("spammer", email="spammer2@example.com").status_code, 201)
 
         events = self.admin.get("/admin/account-events", params={"user_id": user_id}).json()
         self.assertEqual([e["event_type"] for e in events], ["user_deleted", "user_rejected", "user_registered"])
@@ -236,12 +251,16 @@ class AccountTests(unittest.TestCase):
         member = self.add_user("member", email="old@example.com")
         self.add_user("other", email="used@example.com")
         client = self.client_for("member")
-        wrong = client.patch("/auth/me", json={"email": "new@example.com", "current_password": "nope"})
+        wrong = client.patch("/auth/me", json={"email": "new@example.com", "current_password": "nope", "code": "123456"})
         self.assertEqual((wrong.status_code, wrong.json()["detail"]), (400, "当前密码不正确"))
-        taken = client.patch("/auth/me", json={"email": "USED@example.com", "current_password": PASSWORD})
+        taken = client.patch("/auth/me", json={"email": "USED@example.com", "current_password": PASSWORD, "code": "123456"})
         self.assertEqual((taken.status_code, taken.json()["detail"]), (409, "邮箱已被使用"))
 
-        ok = client.patch("/auth/me", json={"email": " New@Example.com", "current_password": PASSWORD})
+        sent = client.post("/auth/me/email-code", json={"email": "new@example.com", "current_password": PASSWORD})
+        self.assertEqual(sent.status_code, 200, sent.text)
+        ok = client.patch(
+            "/auth/me", json={"email": " New@Example.com", "current_password": PASSWORD, "code": self.outbox.last_code()},
+        )
         self.assertEqual(ok.json()["email"], "new@example.com")
         self.assertEqual(client.get("/auth/me").json()["email"], "new@example.com")
         self.client_for("new@example.com")
@@ -282,7 +301,10 @@ class AccountTests(unittest.TestCase):
         self.login(self.new_client(), "nobody", "wrong-password")
         self.login(self.new_client(), "other", "wrong-password")
         client = self.client_for("member")
-        client.patch("/auth/me", json={"email": "m@example.com", "current_password": PASSWORD})
+        client.post("/auth/me/email-code", json={"email": "m@example.com", "current_password": PASSWORD})
+        client.patch(
+            "/auth/me", json={"email": "m@example.com", "current_password": PASSWORD, "code": self.outbox.last_code()},
+        )
         client.post("/auth/password", json={"old_password": PASSWORD, "new_password": "new-password-1"})
 
         events = client.get("/auth/events").json()

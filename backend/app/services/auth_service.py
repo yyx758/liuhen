@@ -1,4 +1,4 @@
-"""账号认证：密码哈希、登录会话的创建 / 校验 / 吊销、修改密码与邮箱。"""
+"""账号认证：密码哈希、登录会话的创建 / 校验 / 吊销、修改密码与邮箱、邮箱找回密码。"""
 
 import hashlib
 import re
@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 from backend.app.config.clock import now_utc
 from backend.app.models.user import UserORM, UserSessionORM
 from backend.app.schemas.account import SessionRead
-from backend.app.services import account_event_service
-from backend.app.services.rate_limit import login_failure_lock, login_ip_limiter
+from backend.app.services import account_event_service, email_verification_service as email_codes
+from backend.app.services.rate_limit import email_code_ip_limiter, login_failure_lock, login_ip_limiter
 
 SESSION_COOKIE = "liuhen_session"
 REMEMBER_SECONDS = 7 * 24 * 3600
@@ -41,6 +41,7 @@ class CurrentUser:
     id: int
     username: str
     email: str | None
+    email_verified: bool
     role: str
     must_change_password: bool
     created_at: datetime
@@ -105,8 +106,8 @@ def find_user_by_account(session: Session, account: str) -> UserORM | None:
 
 def _to_current(user: UserORM, session_id: int) -> CurrentUser:
     return CurrentUser(
-        id=user.id, username=user.username, email=user.email, role=user.role,
-        must_change_password=user.must_change_password, created_at=user.created_at,
+        id=user.id, username=user.username, email=user.email, email_verified=user.email_verified_at is not None,
+        role=user.role, must_change_password=user.must_change_password, created_at=user.created_at,
         daily_chat_limit=user.daily_chat_limit, session_id=session_id,
     )
 
@@ -253,30 +254,130 @@ def change_password(
         )
 
 
-def change_email(session: Session, *, user_id: int, email: str | None, current_password: str) -> str | None:
-    """修改或清空自己的邮箱，需要当前密码；返回保存后的邮箱。"""
+def require_email(email: str | None) -> str:
+    """规范化邮箱；需要验证码的场景里邮箱必填。"""
     email = normalize_email(email)
+    if email is None:
+        raise HTTPException(422, "请填写邮箱")
+    return email
+
+
+def check_code_ip(ip: str | None) -> None:
+    if not email_code_ip_limiter.allow(ip or "unknown"):
+        raise HTTPException(429, email_codes.TOO_FREQUENT)
+
+
+def _email_taken(session: Session, email: str, *, exclude_id: int | None = None) -> bool:
+    stmt = select(UserORM.id).where(UserORM.email == email)
+    if exclude_id is not None:
+        stmt = stmt.where(UserORM.id != exclude_id)
+    return session.scalar(stmt) is not None
+
+
+def request_change_email_code(
+    session: Session, *, user_id: int, email: str | None, current_password: str, ip: str | None,
+) -> dict:
+    """个人设置：向新邮箱发送绑定验证码。当前邮箱未验证时，也可以对它本身发码来完成验证。"""
+    check_code_ip(ip)
+    email = require_email(email)
+    with session.begin():
+        user = session.get(UserORM, user_id)
+        if user is None or not verify_password(user.password_hash, current_password):
+            raise HTTPException(400, "当前密码不正确")
+        if user.email == email and user.email_verified_at is not None:
+            raise HTTPException(422, "新邮箱与当前邮箱相同")
+        if _email_taken(session, email, exclude_id=user_id):
+            raise HTTPException(409, "邮箱已被使用")
+        email_codes.send_code(session, purpose="change_email", email=email, user_id=user_id, ip=ip)
+    return email_codes.code_sent_response()
+
+
+def change_email(
+    session: Session, *, user_id: int, email: str | None, code: str | None, current_password: str,
+) -> tuple[str | None, bool]:
+    """修改、验证或清空自己的邮箱，需要当前密码；设置邮箱还需要验证码。返回 (保存后的邮箱, 是否已验证)。"""
+    email = normalize_email(email)
+    error: HTTPException | None = None
     try:
         with session.begin():
             user = session.get(UserORM, user_id, with_for_update=True)
             if user is None or not verify_password(user.password_hash, current_password):
                 raise HTTPException(400, "当前密码不正确")
-            if user.email == email:
-                return email
-            if email is not None and session.scalar(
-                select(UserORM.id).where(UserORM.email == email, UserORM.id != user_id)
-            ) is not None:
-                raise HTTPException(409, "邮箱已被使用")
-            account_event_service.record(
-                session, event_type="email_changed", target_user_id=user_id, actor_user_id=user_id,
-                details={"from": user.email, "to": email},
-            )
-            user.email = email
-            session.flush()
+            verified = user.email_verified_at is not None
+            if user.email == email and (email is None or verified):
+                return email, verified
+            if email is not None:
+                if not code:
+                    raise HTTPException(422, "请填写验证码")
+                if _email_taken(session, email, exclude_id=user_id):
+                    raise HTTPException(409, "邮箱已被使用")
+                if not email_codes.consume(session, purpose="change_email", email=email, user_id=user_id, code=code):
+                    # 不在事务里抛出：失败次数要随事务提交保存下来。
+                    error = HTTPException(400, email_codes.CODE_WRONG)
+            if error is None:
+                # 验证当前（未验证的）邮箱本身也记为 email_changed，from 与 to 相同。
+                account_event_service.record(
+                    session, event_type="email_changed", target_user_id=user_id, actor_user_id=user_id,
+                    details={"from": user.email, "to": email, "verified": email is not None},
+                )
+                user.email = email
+                user.email_verified_at = now_utc() if email is not None else None
+                session.flush()
     except IntegrityError as exc:
         # 查重与写入之间被别人抢先用了同一个邮箱，由唯一约束兜底。
         raise HTTPException(409, "邮箱已被使用") from exc
-    return email
+    if error is not None:
+        raise error
+    return email, email is not None
+
+
+def _reset_target(session: Session, email: str, *, lock: bool = False) -> UserORM | None:
+    """能用邮箱找回密码的账号：邮箱已验证且状态正常（E12）。"""
+    stmt = select(UserORM).where(
+        UserORM.email == email, UserORM.email_verified_at.is_not(None), UserORM.status == "active",
+    )
+    return session.scalar(stmt.with_for_update() if lock else stmt)
+
+
+def request_password_reset_code(session: Session, *, email: str | None, ip: str | None) -> dict:
+    """发送找回密码验证码。无论邮箱有没有对应账号、是否被限流，都返回同样的响应（E13）。"""
+    check_code_ip(ip)
+    email = require_email(email)
+    with session.begin():
+        user = _reset_target(session, email)
+        if user is not None:
+            email_codes.send_code(
+                session, purpose="reset_password", email=email, user_id=user.id, ip=ip, silent=True,
+            )
+    return email_codes.code_sent_response()
+
+
+def reset_password_by_email(session: Session, *, email: str | None, code: str, new_password: str) -> None:
+    """用找回验证码设置新密码：清除强制改密、吊销全部会话、解除登录锁定（E14）。"""
+    email = require_email(email)
+    error = HTTPException(400, email_codes.CODE_WRONG)
+    with session.begin():
+        user = _reset_target(session, email, lock=True)
+        # 账号不存在与验证码错误返回同一个错误；验证码错误时失败次数要随事务提交，所以不在事务里抛出。
+        if user is not None and email_codes.consume(
+            session, purpose="reset_password", email=email, user_id=user.id, code=code,
+        ):
+            # 新密码不合规时在事务里抛出：事务回滚，验证码的"已使用"标记一起撤销，用户改好密码可以接着用。
+            validate_password(new_password, user.username)
+            user.password_hash = hash_password(new_password)
+            user.must_change_password = False
+            revoked = revoke_sessions(session, user.id)
+            account_event_service.record(
+                session, event_type="password_reset", target_user_id=user.id, actor_user_id=user.id,
+                details={"source": "email", "revoked_sessions": revoked},
+            )
+            username = user.username
+            error = None
+    if error is not None:
+        raise error
+    # 登录锁定按输入的账号字符串记录，用户名和邮箱两个键都清掉。
+    for key in (username, email):
+        login_failure_lock.clear(key)
 
 
 def _is_live(row: UserSessionORM, now: int) -> bool:

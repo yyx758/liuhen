@@ -53,7 +53,7 @@ async function submit() {
 
           <div class="login-options">
             <label class="login-remember"><input v-model="remember" type="checkbox" />保持登录 7 天</label>
-            <button type="button" @click="notice = '请联系管理员重置密码。'">忘记密码</button>
+            <RouterLink to="/forgot-password">忘记密码</RouterLink>
           </div>
 
           <button class="login-submit" type="submit" :disabled="submitting">{{ submitting ? '登录中…' : '登录' }}</button>

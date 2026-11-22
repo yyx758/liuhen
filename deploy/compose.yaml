@@ -22,6 +22,7 @@ services:
     env_file:
       - ./secrets/model.env
       - ./secrets/postgres.env
+      - ./secrets/smtp.env
     environment:
       LIUHEN_DATABASE_HOST: db
       LIUHEN_SQL_ECHO: "false"

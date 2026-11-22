@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { api, type LoginSession, type OwnEvent } from '../api'
 import { auth } from '../auth'
+import { useCodeCountdown } from '../codeCountdown'
 import { ACCOUNT_EVENT_LABELS, ago, deviceLabel, stamp } from '../format'
 import { PASSWORD_PATH } from '../router'
 import { state } from '../state'
@@ -12,11 +13,29 @@ const events = ref<OwnEvent[]>([])
 const loadError = ref('')
 const otherSessions = computed(() => sessions.value.filter(item => !item.current))
 
-// 弹窗：修改邮箱，或下线设备的二次确认。
-type Dialog = { type: 'email'; email: string; password: string } | { type: 'revoke'; session: LoginSession } | { type: 'revoke-others' }
+// 弹窗：修改 / 验证 / 清除邮箱，或下线设备的二次确认。
+type EmailDialog = { type: 'email'; email: string; password: string; code: string }
+type Dialog = EmailDialog | { type: 'revoke'; session: LoginSession } | { type: 'revoke-others' }
 const dialog = ref<Dialog | null>(null)
 const dialogError = ref('')
+const dialogInfo = ref('')
 const busy = ref(false)
+const countdown = useCodeCountdown()
+
+/** 邮箱框留空表示清除邮箱，清除不需要验证码。 */
+function clearing(value: EmailDialog) { return !value.email.trim() }
+
+async function sendEmailCode(value: EmailDialog) {
+  dialogError.value = value.password ? '' : '请先输入当前密码'
+  dialogInfo.value = ''
+  if (dialogError.value) return
+  try {
+    await countdown.send(() => api.ownEmailCode(value.email.trim(), value.password))
+    dialogInfo.value = `验证码已发送到 ${value.email.trim()}，10 分钟内有效。`
+  } catch (error) {
+    dialogError.value = error instanceof Error ? error.message : '验证码发送失败，请稍后再试'
+  }
+}
 
 async function load() {
   loadError.value = ''
@@ -28,7 +47,7 @@ async function load() {
 }
 onMounted(load)
 
-function open(value: Dialog) { dialog.value = value; dialogError.value = '' }
+function open(value: Dialog) { dialog.value = value; dialogError.value = ''; dialogInfo.value = '' }
 function close() { if (!busy.value) dialog.value = null }
 
 async function confirmDialog() {
@@ -38,9 +57,10 @@ async function confirmDialog() {
   dialogError.value = ''
   try {
     if (current.type === 'email') {
-      const user = await api.changeEmail(current.email.trim() || null, current.password)
-      if (auth.user) auth.user.email = user.email
-      state.toast = user.email ? `邮箱已改为 ${user.email}。` : '邮箱已清除。'
+      const email = current.email.trim() || null
+      const user = await api.changeEmail(email, email ? current.code.trim() : null, current.password)
+      if (auth.user) Object.assign(auth.user, { email: user.email, email_verified: user.email_verified })
+      state.toast = user.email ? `邮箱 ${user.email} 已验证。` : '邮箱已清除。'
     } else if (current.type === 'revoke') {
       await api.revokeSession(current.session.id)
       state.toast = `已下线 ${deviceLabel(current.session.user_agent)}。`
@@ -76,7 +96,9 @@ async function confirmDialog() {
         <dt>邮箱</dt>
         <dd>
           {{ auth.user?.email || '未填写' }}
-          <button class="text-btn acc-inline" type="button" @click="open({ type: 'email', email: auth.user?.email ?? '', password: '' })">修改</button>
+          <span v-if="auth.user?.email" class="tag" :class="auth.user.email_verified ? 'green' : 'yellow'">{{ auth.user.email_verified ? '已验证' : '未验证' }}</span>
+          <button class="text-btn acc-inline" type="button" @click="open({ type: 'email', email: auth.user?.email ?? '', password: '', code: '' })">{{ auth.user?.email && !auth.user.email_verified ? '验证' : '修改' }}</button>
+          <span v-if="!auth.user?.email_verified" class="tiny">　验证邮箱后才能用它找回密码</span>
         </dd>
         <dt>角色</dt><dd>{{ auth.user?.role === 'admin' ? '管理员' : '普通用户' }}</dd>
         <dt>注册时间</dt><dd>{{ auth.user ? stamp(auth.user.created_at) : '' }}</dd>
@@ -115,14 +137,22 @@ async function confirmDialog() {
     <div v-if="dialog" class="overlay" @click.self="close">
       <section class="modal" role="dialog" aria-modal="true" aria-labelledby="acc-dialog-title">
         <template v-if="dialog.type === 'email'">
-          <h2 id="acc-dialog-title" class="adm-modal-title">修改邮箱</h2>
-          <p class="adm-desc">邮箱可以用来登录；留空表示清除邮箱。需要输入当前密码确认。</p>
+          <h2 id="acc-dialog-title" class="adm-modal-title">邮箱</h2>
+          <p class="adm-desc">邮箱可以用来登录和找回密码，保存前需要输入当前密码，并填写发到新邮箱的验证码。留空表示清除邮箱，不需要验证码。</p>
           <form id="acc-email-form" @submit.prevent="confirmDialog">
-            <label class="adm-label" for="acc-email">新邮箱</label>
+            <label class="adm-label" for="acc-email">邮箱</label>
             <input id="acc-email" v-model="dialog.email" class="field" type="email" maxlength="255" autocomplete="email" placeholder="留空表示清除" />
             <label class="adm-label acc-gap" for="acc-password">当前密码</label>
             <input id="acc-password" v-model="dialog.password" class="field" type="password" maxlength="128" autocomplete="current-password" required />
+            <template v-if="!clearing(dialog)">
+              <label class="adm-label acc-gap" for="acc-code">邮箱验证码</label>
+              <div class="acc-code-row">
+                <input id="acc-code" v-model="dialog.code" class="field" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6 位数字" />
+                <button class="outline" type="button" :disabled="countdown.disabled.value" @click="sendEmailCode(dialog)">{{ countdown.label.value }}</button>
+              </div>
+            </template>
           </form>
+          <p v-if="dialogInfo" class="adm-note">{{ dialogInfo }}</p>
         </template>
         <template v-else-if="dialog.type === 'revoke'">
           <h2 id="acc-dialog-title" class="adm-modal-title">下线这台设备？</h2>
@@ -135,7 +165,7 @@ async function confirmDialog() {
         <p v-if="dialogError" class="adm-note red" role="alert">{{ dialogError }}</p>
         <div class="modal-actions">
           <button class="outline" type="button" :disabled="busy" @click="close">取消</button>
-          <button v-if="dialog.type === 'email'" class="solid" type="submit" form="acc-email-form" :disabled="busy || !dialog.password">{{ busy ? '保存中…' : '保存' }}</button>
+          <button v-if="dialog.type === 'email'" class="solid" type="submit" form="acc-email-form" :disabled="busy || !dialog.password || (!clearing(dialog) && !dialog.code.trim())">{{ busy ? '保存中…' : '保存' }}</button>
           <button v-else class="solid red" type="button" :disabled="busy" @click="confirmDialog">{{ busy ? '处理中…' : '确认下线' }}</button>
         </div>
       </section>

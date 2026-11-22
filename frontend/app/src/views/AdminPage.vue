@@ -137,7 +137,12 @@ function eventActor(event: AccountEvent) {
 
 function eventDetail(event: AccountEvent) {
   const details = event.details ?? {}
-  if (event.event_type === 'email_changed') return `${details.from ?? '无'} → ${details.to ?? '无'}`
+  if (event.event_type === 'email_changed') {
+    const change = details.from === details.to ? `验证 ${details.to}` : `${details.from ?? '无'} → ${details.to ?? '无'}`
+    return details.verified ? `${change}（已验证）` : change
+  }
+  if (event.event_type === 'password_reset' && details.source === 'email') return '通过邮箱找回'
+  if (event.event_type === 'user_registered' && details.email_verified) return '邮箱已验证'
   if (event.event_type === 'role_changed') return `${details.from} → ${details.to}`
   if (event.event_type === 'chat_limit_changed') return `${limitText(details.from)} → ${limitText(details.to)}`
   return ''
@@ -254,7 +259,7 @@ async function copyPassword() {
             <span class="av" :class="{ admin: user.role === 'admin' }">{{ user.username[0].toUpperCase() }}</span>
             <div>
               <div class="nm">{{ user.username }}<span v-if="user.role === 'admin'" class="tag blue">管理员</span><span v-if="user.must_change_password" class="tag yellow" title="管理员已重置密码，等待用户修改">待改密</span></div>
-              <div class="em">{{ user.email || '未填写邮箱' }}</div>
+              <div class="em">{{ user.email || '未填写邮箱' }}<template v-if="user.email && !user.email_verified">（未验证）</template></div>
             </div>
           </div>
           <div class="c-status"><span class="tag" :class="STATUS[user.status][1]"><span class="pill-dot"></span>{{ STATUS[user.status][0] }}</span></div>
@@ -331,7 +336,7 @@ async function copyPassword() {
         <div v-if="drawerUser.status === 'pending'" class="adm-note">{{ waitText(drawerUser.created_at) }}。通过后对方即可登录；拒绝后用户名仍被占用，可以再删除释放。</div>
         <div v-if="drawerUser.status_reason && (drawerUser.status === 'disabled' || drawerUser.status === 'rejected')" class="adm-note red">{{ drawerUser.status === 'disabled' ? '停用' : '拒绝' }}原因：{{ drawerUser.status_reason }}</div>
         <dl class="acc-kv">
-          <dt>邮箱</dt><dd>{{ drawerUser.email || '未填写' }}</dd>
+          <dt>邮箱</dt><dd>{{ drawerUser.email || '未填写' }}<span v-if="drawerUser.email" class="tag" :class="drawerUser.email_verified ? 'green' : 'yellow'">{{ drawerUser.email_verified ? '已验证' : '未验证' }}</span></dd>
           <dt>注册时间</dt><dd>{{ stamp(drawerUser.created_at) }}（{{ ago(drawerUser.created_at, state.clockNow) }}）</dd>
           <dt>最近登录</dt><dd>{{ drawerUser.last_login_at ? `${stamp(drawerUser.last_login_at)}（${ago(drawerUser.last_login_at, state.clockNow)}）` : '从未登录' }}</dd>
           <dt v-if="drawerUser.reviewed_at">审核时间</dt><dd v-if="drawerUser.reviewed_at">{{ stamp(drawerUser.reviewed_at) }}</dd>

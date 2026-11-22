@@ -17,9 +17,10 @@ from backend.app.models.account_event import AccountEventORM
 from backend.app.models.user import UserORM
 from backend.app.schemas.account import AdminUserPage, AdminUserRead, RegisterRead
 from backend.app.schemas.auth import UserRead
-from backend.app.services import account_event_service, usage_service
+from backend.app.services import account_event_service, email_verification_service as email_codes, usage_service
 from backend.app.services.auth_service import (
-    hash_password, normalize_account, normalize_email, revoke_sessions, validate_password, validate_username,
+    check_code_ip, hash_password, normalize_account, normalize_email, require_email, revoke_sessions,
+    validate_password, validate_username,
 )
 from backend.app.services.rate_limit import register_ip_limiter
 
@@ -54,21 +55,39 @@ def _insert_user(session: Session, user: UserORM) -> None:
         raise HTTPException(409, "用户名或邮箱已被使用") from exc
 
 
-def register(session: Session, *, username: str, password: str, email: str | None, ip: str | None) -> RegisterRead:
-    """注册新账号，状态为 pending，不登录。"""
+def request_register_code(session: Session, *, email: str | None, ip: str | None) -> dict:
+    """向注册邮箱发送验证码。邮箱已被占用时直接返回 409（E11）。"""
+    check_code_ip(ip)
+    email = require_email(email)
+    with session.begin():
+        _ensure_unique(session, username=None, email=email)
+        email_codes.send_code(session, purpose="register", email=email, user_id=None, ip=ip)
+    return email_codes.code_sent_response()
+
+
+def register(
+    session: Session, *, username: str, password: str, email: str | None, code: str, ip: str | None,
+) -> RegisterRead:
+    """凭邮箱验证码注册新账号，状态为 pending，不登录。"""
     if not register_ip_limiter.allow(ip or "unknown"):
         raise HTTPException(429, "注册过于频繁，请稍后再试")
     username = validate_username(username)
     validate_password(password, username)
-    email = normalize_email(email)
+    email = require_email(email)
     with session.begin():
-        user = UserORM(username=username, email=email, password_hash=hash_password(password))
-        _insert_user(session, user)
-        account_event_service.record(
-            session, event_type="user_registered", target_user_id=user.id, actor_user_id=user.id,
-            details={"source": "web", "ip": ip},
-        )
-        return RegisterRead(username=user.username, status="pending")
+        _ensure_unique(session, username=username, email=email)
+        if email_codes.consume(session, purpose="register", email=email, user_id=None, code=code):
+            user = UserORM(
+                username=username, email=email, email_verified_at=now_utc(), password_hash=hash_password(password),
+            )
+            _insert_user(session, user)
+            account_event_service.record(
+                session, event_type="user_registered", target_user_id=user.id, actor_user_id=user.id,
+                details={"source": "web", "ip": ip, "email_verified": True},
+            )
+            return RegisterRead(username=user.username, status="pending")
+    # 验证码错误：事务已提交（保存失败次数），再报错。
+    raise HTTPException(400, email_codes.CODE_WRONG)
 
 
 def create_admin(session: Session, *, username: str, password: str, email: str | None = None) -> UserRead:
@@ -88,7 +107,7 @@ def create_admin(session: Session, *, username: str, password: str, email: str |
         )
         # 返回普通数据：提交后 ORM 对象可能过期，调用方关闭 Session 后再读属性会出错。
         return UserRead(
-            id=user.id, username=user.username, email=user.email, role=user.role,
+            id=user.id, username=user.username, email=user.email, email_verified=False, role=user.role,
             must_change_password=user.must_change_password, created_at=user.created_at,
         )
 
@@ -248,7 +267,8 @@ def set_chat_limit(session: Session, *, actor_id: int, target_id: int, daily_cha
 
 def _admin_read(user: UserORM, status_reason: str | None, days: list[int], *, with_days: bool = False) -> AdminUserRead:
     return AdminUserRead(
-        id=user.id, username=user.username, email=user.email, role=user.role, status=user.status,
+        id=user.id, username=user.username, email=user.email, email_verified=user.email_verified_at is not None,
+        role=user.role, status=user.status,
         must_change_password=user.must_change_password, created_at=user.created_at,
         last_login_at=user.last_login_at, reviewed_at=user.reviewed_at, status_reason=status_reason,
         daily_chat_limit=user.daily_chat_limit,

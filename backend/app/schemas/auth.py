@@ -27,6 +27,7 @@ class UserRead(BaseModel):
     id: int
     username: str
     email: str | None
+    email_verified: bool
     role: str
     must_change_password: bool
     created_at: datetime

@@ -29,8 +29,10 @@
 - 只有状态为 `active` 的账号能登录；账号不存在与密码错误返回同一提示，密码正确时才告知待审核、已拒绝、已停用。同一 IP 每分钟最多 10 次登录，同一账号连续失败 5 次锁定 15 分钟（进程内计数，单实例部署适用）。
 - 带会话 Cookie 的写请求（以及登录请求）必须带允许的 `Origin` 头，否则返回 403；允许来源由 `allowed_origins`（或 `LIUHEN_ALLOWED_ORIGINS`）配置。本地用 http 访问时把 `cookie_secure` 设为 `false`。
 - 业务接口依赖 `CurrentUserId`：未登录返回 401，管理员重置密码后、修改密码前返回 403。所有接口的错误格式都是 `{"detail": "提示文字"}`，不带错误码。
-- 注册（`POST /auth/register`，同一 IP 每小时 5 次）后账号为 `pending`，管理员通过后才能登录。管理员接口在 `/admin/*`（依赖 `AdminUser`，普通用户 403）：账号列表、审核通过/拒绝、停用/启用（停用立即吊销会话）、重置密码、删除待审核或已拒绝账号、查看账号事件。管理员不能停用或重置自己；停用时同时锁住操作者，保证始终有一个正常的管理员。
-- 个人设置：`PATCH /auth/me` 修改邮箱（需当前密码）、`/auth/sessions` 在线设备与下线、`GET /auth/events` 最近 30 天的登录与密码事件。除 `GET /auth/me`、`POST /auth/password` 外，这些接口在强制改密期间同样返回 403。
+- 邮箱验证码（`docs/prd/prd-email-verification.md`）：6 位数字，经 SMTP（SSL）同步发送，10 分钟有效；数据库 `email_verification_codes` 只存 SHA-256。同一邮箱 60 秒冷却、每小时 5 次，同一 IP 每小时 10 次；重新获取会作废同一目标的旧码，输错 5 次作废。发信失败返回 502、未配置 SMTP 返回 503，这次的验证码不入库。`users.email_verified_at` 记录邮箱是否已验证。
+- 注册（`POST /auth/register`，同一 IP 每小时 5 次）需要邮箱和注册验证码（`POST /auth/register/email-code`），之后账号为 `pending`，管理员通过后才能登录。管理员接口在 `/admin/*`（依赖 `AdminUser`，普通用户 403）：账号列表、审核通过/拒绝、停用/启用（停用立即吊销会话）、重置密码、删除待审核或已拒绝账号、查看账号事件。管理员不能停用或重置自己；停用时同时锁住操作者，保证始终有一个正常的管理员。
+- 邮箱找回密码：`POST /auth/password-reset/email-code` 只给邮箱已验证、状态正常的账号发信，但对任何邮箱都返回同样的成功响应（按邮箱的频率限制也静默处理），不暴露账号是否存在；`POST /auth/password-reset` 凭验证码设置新密码，同时吊销该账号全部会话、解除登录锁定。邮箱未验证的账号仍由管理员重置。
+- 个人设置：`POST /auth/me/email-code` 向新邮箱（或尚未验证的当前邮箱）发验证码，`PATCH /auth/me` 凭验证码修改或验证邮箱、留空清除（都需当前密码）、`/auth/sessions` 在线设备与下线、`GET /auth/events` 最近 30 天的登录与密码事件。除 `GET /auth/me`、`POST /auth/password` 外，这些接口在强制改密期间同样返回 403。
 - 账号事件 `account_events` 只追加，与账号变更同一事务提交：注册、审核、停用/启用、删除、改密/重置、改邮箱、角色变更、登录成功/失败/锁定、下线设备。账号不存在的登录失败不入表；`target_user_id`、`actor_user_id` 不加外键，账号删除后记录仍保留，命令行操作的 `actor_user_id` 为空。
 - 每日对话上限：普通用户每个 UTC+08:00 自然日最多新建 `daily_chat_limit` 轮对话（为空时取 `default_daily_chat_limit` / `LIUHEN_DEFAULT_DAILY_CHAT_LIMIT`，默认 50），超出时 `POST /chat` 返回 429；管理员不受限制但照常计数。检查在 `acquire_turn` 新建轮次的同一事务里进行，先锁用户行，并发请求不能突破上限；同一 `request_id` 重试不计数。删除会话时被删轮次的创建时间保留在 `deleted_chat_requests.turn_created_at`，用量统计两处相加，删除会话不能重置用量。`/auth/me` 返回 `chat_usage`；管理员列表与详情返回今日、近 7 天用量，`PATCH /admin/users/{id}` 调整单个用户的上限（`null` 恢复默认）。
 - 账号管理命令行：
@@ -120,6 +122,9 @@ python -m backend.app.main
 | `POST /auth/logout` | 删除当前会话并清除 Cookie |
 | `GET /auth/me` | 当前用户信息（含是否需要修改密码） |
 | `POST /auth/password` | 修改密码；其他设备的会话全部失效 |
+| `POST /auth/register/email-code`、`POST /auth/register` | 获取注册验证码；凭验证码注册 |
+| `POST /auth/password-reset/email-code`、`POST /auth/password-reset` | 获取找回密码验证码；凭验证码重置密码 |
+| `POST /auth/me/email-code`、`PATCH /auth/me` | 获取绑定邮箱验证码；修改、验证或清除邮箱 |
 | `POST /chat` | 发送一轮自然语言消息；请求包含 `request_id`、`user_text`，后续轮次带上 `conversation_id` |
 | `DELETE /chat/conversations/{conversation_id}` | 删除会话与消息；处理中的会话不可删除，任务与审计保留 |
 | `POST /tasks` | 直接创建任务；请求头包含 `Idempotency-Key` |
