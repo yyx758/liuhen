@@ -244,7 +244,8 @@ class EmailVerificationTests(unittest.TestCase):
         [row] = self.code_rows()
         self.assertEqual(row.failed_attempts, 5)
         self.assertIsNotNone(row.invalidated_at)
-        # 输错 5 次后，正确的验证码也不能再用。
+        # 输错 5 次后，正确的验证码也不能再用。（注册接口每 IP 每小时 5 次，先重置，排除限流干扰。）
+        register_ip_limiter.reset()
         self.assertEqual(self.register("newbie", email, code).json()["detail"], CODE_WRONG)
         self.assertIsNone(self.user("newbie"))
 
@@ -318,8 +319,19 @@ class EmailVerificationTests(unittest.TestCase):
             )
         self.assertEqual(details, {"from": "old@example.com", "to": "new@example.com", "verified": True})
 
-    def test_change_email_code_request_rejections(self) -> None:
+    def test_legacy_user_verifies_existing_email(self) -> None:
+        # 迁移前的老账号：邮箱已填但未验证，可以对现有邮箱发码完成验证，不必先清空。
         self.add_user("member", email="mine@example.com")
+        member = self.client_for("member")
+        sent = member.post("/auth/me/email-code", json={"email": "mine@example.com", "current_password": PASSWORD})
+        self.assertEqual(sent.status_code, 200, sent.text)
+        ok = member.patch(
+            "/auth/me", json={"email": "mine@example.com", "current_password": PASSWORD, "code": self.outbox.last_code()},
+        )
+        self.assertEqual((ok.json()["email"], ok.json()["email_verified"]), ("mine@example.com", True))
+
+    def test_change_email_code_request_rejections(self) -> None:
+        self.add_user("member", email="mine@example.com", verified=True)
         self.add_user("other", email="used@example.com")
         member = self.client_for("member")
 

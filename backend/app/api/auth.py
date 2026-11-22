@@ -1,11 +1,12 @@
-"""注册、登录、登出与个人设置（当前用户、密码、邮箱、在线设备、登录记录）。"""
+"""注册、登录、登出、邮箱找回密码与个人设置（当前用户、密码、邮箱、在线设备、登录记录）。"""
 
 from fastapi import APIRouter, Request, Response, status
 
 from backend.app.api.deps import ActiveUser, DbSession, SessionUser
 from backend.app.config.env import get_auth_config
 from backend.app.schemas.account import (
-    EmailChangeRequest, OwnEventRead, RegisterRead, RegisterRequest, RevokedRead, SessionRead,
+    EmailChangeRequest, EmailCodeRequest, EmailCodeSent, OwnEmailCodeRequest, OwnEventRead, PasswordResetRequest,
+    RegisterRead, RegisterRequest, RevokedRead, SessionRead,
 )
 from backend.app.schemas.auth import ChatUsage, LoginRequest, PasswordChangeRequest, UserRead
 from backend.app.services import account_event_service, account_service, auth_service, usage_service
@@ -20,7 +21,7 @@ def to_user_read(user: CurrentUser, session: DbSession) -> UserRead:
         session, user_id=user.id, role=user.role, daily_chat_limit=user.daily_chat_limit,
     )
     return UserRead(
-        id=user.id, username=user.username, email=user.email,
+        id=user.id, username=user.username, email=user.email, email_verified=user.email_verified,
         role=user.role, must_change_password=user.must_change_password, created_at=user.created_at,
         chat_usage=ChatUsage(today=today, limit=limit),
     )
@@ -30,12 +31,31 @@ def client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+@router.post("/register/email-code", response_model=EmailCodeSent)
+def register_email_code(data: EmailCodeRequest, request: Request, session: DbSession) -> dict:
+    return account_service.request_register_code(session, email=data.email, ip=client_ip(request))
+
+
 @router.post("/register", response_model=RegisterRead, status_code=status.HTTP_201_CREATED)
 def register(data: RegisterRequest, request: Request, session: DbSession) -> RegisterRead:
     # 注册后账号待审核，不创建会话、不设置 Cookie。
     return account_service.register(
-        session, username=data.username, password=data.password, email=data.email, ip=client_ip(request),
+        session, username=data.username, password=data.password, email=data.email, code=data.code,
+        ip=client_ip(request),
     )
+
+
+@router.post("/password-reset/email-code", response_model=EmailCodeSent)
+def password_reset_email_code(data: EmailCodeRequest, request: Request, session: DbSession) -> dict:
+    # 无论邮箱是否对应账号都返回同样的结果，不暴露账号是否存在。
+    return auth_service.request_password_reset_code(session, email=data.email, ip=client_ip(request))
+
+
+@router.post("/password-reset", status_code=status.HTTP_204_NO_CONTENT)
+def password_reset(data: PasswordResetRequest, session: DbSession) -> Response:
+    # 重置后所有设备下线，不自动登录。
+    auth_service.reset_password_by_email(session, email=data.email, code=data.code, new_password=data.new_password)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/login", response_model=UserRead)
@@ -77,12 +97,19 @@ def change_password(data: PasswordChangeRequest, user: SessionUser, session: DbS
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/me/email-code", response_model=EmailCodeSent)
+def own_email_code(data: OwnEmailCodeRequest, request: Request, user: ActiveUser, session: DbSession) -> dict:
+    return auth_service.request_change_email_code(
+        session, user_id=user.id, email=data.email, current_password=data.current_password, ip=client_ip(request),
+    )
+
+
 @router.patch("/me", response_model=UserRead)
 def change_email(data: EmailChangeRequest, user: ActiveUser, session: DbSession) -> UserRead:
-    email = auth_service.change_email(
-        session, user_id=user.id, email=data.email, current_password=data.current_password,
+    email, verified = auth_service.change_email(
+        session, user_id=user.id, email=data.email, code=data.code, current_password=data.current_password,
     )
-    return to_user_read(user, session).model_copy(update={"email": email})
+    return to_user_read(user, session).model_copy(update={"email": email, "email_verified": verified})
 
 
 @router.get("/sessions", response_model=list[SessionRead])

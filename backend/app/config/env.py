@@ -50,3 +50,20 @@ def get_auth_config() -> dict:
             if origin.strip()
         },
     }
+
+
+def get_smtp_config() -> dict:
+    """发信用的 SMTP 配置；部署环境变量优先，本地回退到 .env。每次调用都重新读取，未配置时各项为 None。"""
+    values = dotenv_values(ENV_FILE, interpolate=False)
+
+    def read(name: str) -> str | None:
+        return getenv(f"LIUHEN_{name.upper()}") or values.get(name) or None
+
+    return {
+        "host": read("smtp_host"),
+        "port": int(read("smtp_port") or 465),
+        # 完整邮箱地址，同时作为发件地址。
+        "username": read("smtp_username"),
+        # QQ 邮箱填 SMTP 授权码，不是 QQ 密码。
+        "password": read("smtp_password"),
+    }

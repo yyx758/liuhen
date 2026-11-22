@@ -13,7 +13,8 @@ class RegisterRequest(BaseModel):
 
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
-    email: str | None = Field(default=None, max_length=255)
+    email: str = Field(max_length=255)
+    code: str = Field(min_length=1, max_length=16, description="邮箱验证码")
 
 
 class RegisterRead(BaseModel):
@@ -21,11 +22,35 @@ class RegisterRead(BaseModel):
     status: UserStatus
 
 
+class EmailCodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(max_length=255)
+
+
+class OwnEmailCodeRequest(EmailCodeRequest):
+    current_password: str = Field(min_length=1, max_length=128)
+
+
+class EmailCodeSent(BaseModel):
+    expires_in: int = Field(description="验证码有效期（秒）")
+    resend_after: int = Field(description="多少秒后可以重新获取")
+
+
 class EmailChangeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: str | None = Field(default=None, max_length=255, description="留空表示清除邮箱")
+    code: str | None = Field(default=None, max_length=16, description="设置邮箱时必填；清除邮箱时忽略")
     current_password: str = Field(min_length=1, max_length=128)
+
+
+class PasswordResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(max_length=255)
+    code: str = Field(min_length=1, max_length=16)
+    new_password: str = Field(min_length=1, max_length=128)
 
 
 class ReasonRequest(BaseModel):
@@ -58,6 +83,7 @@ class AdminUserRead(BaseModel):
     id: int
     username: str
     email: str | None
+    email_verified: bool
     role: str
     status: UserStatus
     must_change_password: bool

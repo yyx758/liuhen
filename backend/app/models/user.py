@@ -24,6 +24,8 @@ class UserORM(Base):
     must_change_password: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # 邮箱通过验证码验证的时间；为空表示没有邮箱或邮箱未验证。更换或清空邮箱时一并更新。
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 最近一次审核（通过或拒绝）的时间和管理员。只有 pending/rejected 账号能被删除，审核人一定是 active 管理员，
     # 所以这个自引用外键不会挡住删除。
@@ -39,6 +41,7 @@ class UserORM(Base):
         CheckConstraint("status IN ('pending', 'active', 'rejected', 'disabled')", name="ck_users_status"),
         CheckConstraint("username = lower(username)", name="ck_users_username_lower"),
         CheckConstraint("email = lower(email)", name="ck_users_email_lower"),
+        CheckConstraint("email IS NOT NULL OR email_verified_at IS NULL", name="ck_users_email_verified"),
         CheckConstraint("daily_chat_limit BETWEEN 1 AND 1000", name="ck_users_daily_chat_limit"),
     )
 

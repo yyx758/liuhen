@@ -301,7 +301,10 @@ class AccountTests(unittest.TestCase):
         self.login(self.new_client(), "nobody", "wrong-password")
         self.login(self.new_client(), "other", "wrong-password")
         client = self.client_for("member")
-        client.patch("/auth/me", json={"email": "m@example.com", "current_password": PASSWORD})
+        client.post("/auth/me/email-code", json={"email": "m@example.com", "current_password": PASSWORD})
+        client.patch(
+            "/auth/me", json={"email": "m@example.com", "current_password": PASSWORD, "code": self.outbox.last_code()},
+        )
         client.post("/auth/password", json={"old_password": PASSWORD, "new_password": "new-password-1"})
 
         events = client.get("/auth/events").json()
