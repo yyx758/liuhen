@@ -2,9 +2,12 @@
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { api } from '../api'
+import { useCodeCountdown } from '../codeCountdown'
 
 const username = ref('')
 const email = ref('')
+const code = ref('')
+const countdown = useCodeCountdown()
 const password = ref('')
 const confirmPassword = ref('')
 const showPassword = ref(false)
@@ -26,13 +29,25 @@ const passwordHint = computed(() => {
 })
 const confirmHint = computed(() => confirmPassword.value && confirmPassword.value !== password.value ? '两次输入的密码不一致' : '')
 
+async function sendCode() {
+  notice.value = email.value.trim() ? '' : '请先填写邮箱'
+  if (notice.value) return
+  try {
+    await countdown.send(() => api.registerEmailCode(email.value.trim()))
+    notice.value = '验证码已发送，请查收邮件（10 分钟内有效）。'
+  } catch (error) {
+    notice.value = error instanceof Error ? error.message : '验证码发送失败，请稍后再试'
+  }
+}
+
 async function submit() {
   if (submitting.value) return
-  notice.value = usernameHint.value || passwordHint.value || confirmHint.value
+  notice.value = usernameHint.value || (email.value.trim() ? '' : '请填写邮箱') || (code.value.trim() ? '' : '请填写邮箱验证码')
+    || passwordHint.value || confirmHint.value
   if (notice.value) return
   submitting.value = true
   try {
-    const result = await api.register(username.value.trim(), password.value, email.value.trim() || null)
+    const result = await api.register(username.value.trim(), password.value, email.value.trim(), code.value.trim())
     submitted.value = result.username
     password.value = ''
     confirmPassword.value = ''
@@ -67,8 +82,14 @@ async function submit() {
           <input id="register-username" v-model="username" type="text" autocomplete="username" placeholder="3–32 位小写字母、数字或下划线" required maxlength="32" />
           <span v-if="usernameHint" class="register-hint">{{ usernameHint }}</span>
 
-          <label for="register-email" class="login-gap">邮箱（可选）</label>
-          <input id="register-email" v-model="email" type="email" autocomplete="email" placeholder="可用于登录" maxlength="255" />
+          <label for="register-email" class="login-gap">邮箱</label>
+          <div class="login-password-row">
+            <input id="register-email" v-model="email" type="email" autocomplete="email" placeholder="用于登录和找回密码" required maxlength="255" />
+            <button type="button" :disabled="countdown.disabled.value" @click="sendCode">{{ countdown.label.value }}</button>
+          </div>
+
+          <label for="register-code" class="login-gap">邮箱验证码</label>
+          <input id="register-code" v-model="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位数字" required maxlength="6" />
 
           <label for="register-password" class="login-gap">密码</label>
           <input id="register-password" v-model="password" :type="showPassword ? 'text' : 'password'" autocomplete="new-password" placeholder="至少 8 位" required maxlength="128" />

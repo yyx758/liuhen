@@ -74,6 +74,8 @@ export type CurrentUser = {
   id: number
   username: string
   email: string | null
+  /** 邮箱是否已通过验证码验证；只有已验证的邮箱能找回密码。 */
+  email_verified: boolean
   role: 'user' | 'admin'
   must_change_password: boolean
   created_at: string
@@ -82,6 +84,9 @@ export type CurrentUser = {
 }
 
 export type UserStatus = 'pending' | 'active' | 'rejected' | 'disabled'
+
+/** 发送验证码成功：expires_in 秒内有效，resend_after 秒后可以重新获取。 */
+export type EmailCodeSent = { expires_in: number; resend_after: number }
 
 export type LoginSession = {
   id: number
@@ -98,6 +103,7 @@ export type AdminUser = {
   id: number
   username: string
   email: string | null
+  email_verified: boolean
   role: 'user' | 'admin'
   status: UserStatus
   must_change_password: boolean
@@ -166,9 +172,12 @@ async function request<T>(path: string, { handleAuthError = true, ...init }: Req
     throw new Error('无法连接后端，请确认 FastAPI 已启动。')
   }
   if (!response.ok) {
-    if (response.status === 502 || response.status === 503) throw new Error('无法连接后端，请确认 FastAPI 已启动。')
     const body = await response.json().catch(() => null)
     const detail = body?.detail
+    // 反向代理连不上后端时也返回 502/503，但没有后端的 detail；后端自己返回的 502/503（如邮件发送失败）带 detail。
+    if ((response.status === 502 || response.status === 503) && typeof detail !== 'string') {
+      throw new Error('无法连接后端，请确认 FastAPI 已启动。')
+    }
     let message: string | null = null
     if (typeof detail === 'string') message = detail
     else if (Array.isArray(detail)) message = detail.map((item: { msg?: string }) => item.msg).join('；')
@@ -186,11 +195,24 @@ export const api = {
     method: 'POST', body: JSON.stringify({ account, password, remember }), handleAuthError: false,
   }),
   logout: () => request<void>('/auth/logout', { method: 'POST', handleAuthError: false }),
-  register: (username: string, password: string, email: string | null) => request<{ username: string; status: UserStatus }>('/auth/register', {
-    method: 'POST', body: JSON.stringify({ username, password, email }), handleAuthError: false,
+  registerEmailCode: (email: string) => request<EmailCodeSent>('/auth/register/email-code', {
+    method: 'POST', body: JSON.stringify({ email }), handleAuthError: false,
   }),
-  changeEmail: (email: string | null, currentPassword: string) => request<CurrentUser>('/auth/me', {
-    method: 'PATCH', body: JSON.stringify({ email, current_password: currentPassword }),
+  register: (username: string, password: string, email: string, code: string) => request<{ username: string; status: UserStatus }>('/auth/register', {
+    method: 'POST', body: JSON.stringify({ username, password, email, code }), handleAuthError: false,
+  }),
+  passwordResetEmailCode: (email: string) => request<EmailCodeSent>('/auth/password-reset/email-code', {
+    method: 'POST', body: JSON.stringify({ email }), handleAuthError: false,
+  }),
+  resetPassword: (email: string, code: string, newPassword: string) => request<void>('/auth/password-reset', {
+    method: 'POST', body: JSON.stringify({ email, code, new_password: newPassword }), handleAuthError: false,
+  }),
+  ownEmailCode: (email: string, currentPassword: string) => request<EmailCodeSent>('/auth/me/email-code', {
+    method: 'POST', body: JSON.stringify({ email, current_password: currentPassword }),
+  }),
+  /** email 为 null 表示清除邮箱，此时不需要验证码。 */
+  changeEmail: (email: string | null, code: string | null, currentPassword: string) => request<CurrentUser>('/auth/me', {
+    method: 'PATCH', body: JSON.stringify({ email, code, current_password: currentPassword }),
   }),
   sessions: () => request<LoginSession[]>('/auth/sessions'),
   revokeSession: (id: number) => request<void>(`/auth/sessions/${id}`, { method: 'DELETE' }),

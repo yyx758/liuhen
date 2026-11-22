@@ -5,13 +5,13 @@
 ## 首次部署
 
 1. 为 `liuhen.yyyyx.top` 添加指向服务器的 A 记录。首次签发证书时使用 Cloudflare「仅 DNS」模式，并确认服务器的 80/443 端口可从公网访问。
-2. 在服务器的 `deploy/secrets/` 中创建 `model.env`，仅包含 `LIUHEN_BASE_URL`、`LIUHEN_API_KEY`、`LIUHEN_MODEL`。运行 `python3 deploy/setup_postgres.py` 生成私有的 `postgres.env`。
-3. 检查 `docker compose -f deploy/compose.yaml config --quiet`。这个命令需要上述两个环境文件存在。
+2. 在服务器的 `deploy/secrets/` 中创建 `model.env`，仅包含 `LIUHEN_BASE_URL`、`LIUHEN_API_KEY`、`LIUHEN_MODEL`。运行 `python3 deploy/setup_postgres.py` 生成私有的 `postgres.env`。再创建 `smtp.env`，包含 `LIUHEN_SMTP_HOST=smtp.qq.com`、`LIUHEN_SMTP_PORT=465`、`LIUHEN_SMTP_USERNAME`（完整发件邮箱）、`LIUHEN_SMTP_PASSWORD`（QQ 邮箱 SMTP 授权码，不是 QQ 密码），权限设为 600。
+3. 检查 `docker compose -f deploy/compose.yaml config --quiet`。这个命令需要上述三个环境文件存在。
 4. 构建镜像并建表：`docker compose -f deploy/compose.yaml build --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple api web`，然后 `docker compose -f deploy/compose.yaml run --rm api alembic -c backend/alembic.ini upgrade head`。服务器在国内时，构建容器里直连 PyPI 很慢，会超时报"找不到版本"，需用 `PIP_INDEX_URL` 指定镜像源。
 5. 创建管理员：`docker compose -f deploy/compose.yaml run --rm api python -m backend.app.cli create-admin --username <名字>`（交互输入密码）。
 6. 启动 `db`、`api` 和 `web`。PostgreSQL 健康后 API 才会启动；数据库结构版本不是最新时 API 拒绝启动。Caddy 自动申请并续期证书。
 
-`model.env`、`postgres.env` 被 Git 和 Docker 构建上下文忽略，不得提交。
+`model.env`、`postgres.env`、`smtp.env` 被 Git 和 Docker 构建上下文忽略，不得提交。服务器需要能访问 `smtp.qq.com:465`（部分云厂商默认封禁出站 25 端口，465 一般不受影响）。
 
 ## 配置
 

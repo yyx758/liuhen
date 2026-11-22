@@ -9,6 +9,7 @@ import AuditPage from './views/AuditPage.vue'
 import LoginPage from './views/LoginPage.vue'
 import PasswordPage from './views/PasswordPage.vue'
 import RegisterPage from './views/RegisterPage.vue'
+import ForgotPasswordPage from './views/ForgotPasswordPage.vue'
 import AccountPage from './views/AccountPage.vue'
 import AdminPage from './views/AdminPage.vue'
 
@@ -30,6 +31,7 @@ export const router = createRouter({
   routes: [
     { path: '/login', component: LoginPage, meta: { public: true, bare: true } },
     { path: '/register', component: RegisterPage, meta: { public: true, bare: true } },
+    { path: '/forgot-password', component: ForgotPasswordPage, meta: { public: true, bare: true } },
     { path: PASSWORD_PATH, component: PasswordPage, meta: { bare: true } },
     { path: '/account', component: AccountPage },
     { path: '/admin', component: AdminPage, meta: { admin: true } },
@@ -53,7 +55,7 @@ router.beforeEach(async to => {
   // 管理员重置密码后，改完密码之前只能停留在改密页。
   if (user.must_change_password && to.path !== PASSWORD_PATH) return PASSWORD_PATH
   if (to.path === '/login') return safeRedirect(to.query.redirect)
-  if (to.path === '/register') return '/'
+  if (to.path === '/register' || to.path === '/forgot-password') return '/'
   // 后端仍会对 /admin/* 校验角色，这里只是不让普通用户看到空页面。
   if (to.meta.admin && user.role !== 'admin') return '/'
   return true
