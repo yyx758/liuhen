@@ -195,7 +195,8 @@ class RouteProtectionTests(unittest.TestCase):
     # 不需要登录的接口；新增公开接口必须在这里显式登记。
     PUBLIC = {
         ("POST", "/auth/login"), ("POST", "/auth/logout"), ("POST", "/auth/register"),
-        ("POST", "/auth/register/email-code"),
+        ("POST", "/auth/register/email-code"), ("POST", "/auth/password-reset/email-code"),
+        ("POST", "/auth/password-reset"),
     }
     # 强制改密状态下仍可访问的接口；其余 /auth/* 也必须拒绝待改密状态。
     PASSWORD_CHANGE_ALLOWED = {("GET", "/auth/me"), ("POST", "/auth/password")}

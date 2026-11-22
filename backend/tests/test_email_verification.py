@@ -1,4 +1,5 @@
-"""邮箱验证（docs/prd/prd-email-verification.md）：验证码的发送、校验、频率限制，注册与改邮箱接入验证码，SMTP 发信。"""
+"""邮箱验证与找回密码（docs/prd/prd-email-verification.md）：验证码的发送、校验、频率限制，
+注册、改邮箱、找回密码接入验证码，SMTP 发信。"""
 
 import hashlib
 import smtplib
@@ -16,7 +17,7 @@ from backend.app.db.session import get_db
 from backend.app.main import app
 from backend.app.models.account_event import AccountEventORM
 from backend.app.models.email_verification import EmailVerificationCodeORM
-from backend.app.models.user import UserORM
+from backend.app.models.user import UserORM, UserSessionORM
 from backend.app.services import mailer
 from backend.app.services.auth_service import hash_password
 from backend.app.services.rate_limit import (
@@ -26,6 +27,7 @@ from backend.tests.mail_helpers import install_outbox, wrong_code
 
 ORIGIN = "http://127.0.0.1:5173"
 PASSWORD = "correct-horse-1"
+NEW_PASSWORD = "brand-new-pass-2"
 CODE_WRONG = "验证码错误或已过期"
 TOO_FREQUENT = "获取验证码过于频繁，请稍后再试"
 
@@ -348,6 +350,119 @@ class EmailVerificationTests(unittest.TestCase):
         self.assertEqual(cleared.status_code, 200, cleared.text)
         self.assertEqual((cleared.json()["email"], cleared.json()["email_verified"]), (None, False))
         self.assertIsNone(self.user("member").email_verified_at)
+
+    # ---------- 邮箱找回密码 ----------
+    def request_reset_code(self, email: str):
+        return self.client.post("/auth/password-reset/email-code", json={"email": email})
+
+    def reset(self, email: str, code: str, new_password: str = NEW_PASSWORD):
+        return self.client.post(
+            "/auth/password-reset", json={"email": email, "code": code, "new_password": new_password},
+        )
+
+    def login_status(self, account: str, password: str) -> int:
+        return self.new_client().post("/auth/login", json={"account": account, "password": password}).status_code
+
+    def test_reset_password_by_verified_email(self) -> None:
+        user_id = self.add_user("member", email="me@example.com", verified=True)
+        old_device = self.client_for("member")
+        with Session(self.engine) as session, session.begin():
+            session.execute(update(UserORM).where(UserORM.id == user_id).values(must_change_password=True))
+
+        sent = self.request_reset_code(" ME@example.com ")
+        self.assertEqual(sent.status_code, 200, sent.text)
+        self.assertEqual(sent.json(), {"expires_in": 600, "resend_after": 60})
+        self.assertEqual(self.outbox.sent[-1]["to"], "me@example.com")
+        self.assertIn("找回密码", self.outbox.sent[-1]["body"])
+        [row] = self.code_rows()
+        self.assertEqual((row.purpose, row.user_id), ("reset_password", user_id))
+
+        response = self.reset("me@example.com", self.outbox.last_code())
+        self.assertEqual(response.status_code, 204, response.text)
+
+        # 旧密码失效、新密码可登录；原有会话全部下线；强制改密被清除。
+        self.assertEqual(self.login_status("member", PASSWORD), 401)
+        self.assertEqual(old_device.get("/auth/me").status_code, 401)
+        self.assertEqual(self.login_status("member", NEW_PASSWORD), 200)
+        user = self.user("member")
+        self.assertFalse(user.must_change_password)
+        with Session(self.engine) as session:
+            self.assertEqual(session.scalar(
+                select(func.count()).select_from(UserSessionORM).where(UserSessionORM.user_id == user_id)
+            ), 1)
+            event = session.execute(
+                select(AccountEventORM.actor_user_id, AccountEventORM.details)
+                .where(AccountEventORM.event_type == "password_reset")
+            ).one()
+        self.assertEqual(event.actor_user_id, user_id)
+        self.assertEqual(event.details["source"], "email")
+        [row] = self.code_rows()
+        self.assertIsNotNone(row.used_at)
+        self.assertEqual(self.reset("me@example.com", self.outbox.last_code(), "another-pass-3").json()["detail"], CODE_WRONG)
+
+    def test_reset_code_only_mailed_to_verified_active_accounts(self) -> None:
+        self.add_user("unverified", email="unverified@example.com")
+        self.add_user("pending", email="pending@example.com", verified=True, status="pending")
+        self.add_user("disabled", email="disabled@example.com", verified=True, status="disabled")
+        for email in ("nobody@example.com", "unverified@example.com", "pending@example.com", "disabled@example.com"):
+            with self.subTest(email=email):
+                response = self.request_reset_code(email)
+                self.assertEqual((response.status_code, response.json()), (200, {"expires_in": 600, "resend_after": 60}))
+        self.assertEqual(self.outbox.sent, [])
+        self.assertEqual(self.code_rows(), [])
+
+    def test_reset_code_rate_limit_is_silent(self) -> None:
+        # 有账号的邮箱第二次请求也返回 200（只是不发信），与没有账号的邮箱看不出区别。
+        self.add_user("member", email="me@example.com", verified=True)
+        for email in ("me@example.com", "nobody@example.com"):
+            with self.subTest(email=email):
+                responses = [self.request_reset_code(email) for _ in range(3)]
+                self.assertEqual([r.status_code for r in responses], [200, 200, 200])
+                self.assertEqual(len({r.text for r in responses}), 1)
+        self.assertEqual(len(self.outbox.sent), 1)
+
+    def test_reset_code_ip_limit_and_format(self) -> None:
+        self.assertEqual(self.request_reset_code("not-an-email").status_code, 422)
+        statuses = [self.request_reset_code(f"user{i}@example.com").status_code for i in range(11)]
+        self.assertEqual(statuses[-1], 429)
+
+    def test_reset_rejections_look_the_same(self) -> None:
+        self.add_user("member", email="me@example.com", verified=True)
+        self.request_reset_code("me@example.com")
+        code = self.outbox.last_code()
+        unknown = self.reset("nobody@example.com", code)
+        wrong = self.reset("me@example.com", wrong_code(code))
+        self.assertEqual((unknown.status_code, unknown.json()), (wrong.status_code, wrong.json()))
+        self.assertEqual((wrong.status_code, wrong.json()["detail"]), (400, CODE_WRONG))
+        [row] = self.code_rows()
+        self.assertEqual(row.failed_attempts, 1)
+
+    def test_reset_with_invalid_password_keeps_code(self) -> None:
+        self.add_user("member", email="me@example.com", verified=True)
+        self.request_reset_code("me@example.com")
+        code = self.outbox.last_code()
+        short = self.reset("me@example.com", code, "short")
+        self.assertEqual((short.status_code, short.json()["detail"]), (422, "密码长度须为 8–128 位"))
+        self.assertEqual(self.reset("me@example.com", code).status_code, 204)
+
+    def test_change_email_code_cannot_reset_password(self) -> None:
+        self.add_user("member", email="me@example.com", verified=True)
+        member = self.client_for("member")
+        member.post("/auth/me/email-code", json={"email": "next@example.com", "current_password": PASSWORD})
+        change_code = self.outbox.last_code()
+        # 之后 next@ 归了另一个账号（直接写库模拟）：改邮箱用途的验证码不能拿来重置它的密码。
+        self.add_user("other", email="next@example.com", verified=True)
+        self.assertEqual(self.reset("next@example.com", change_code).json()["detail"], CODE_WRONG)
+        self.assertEqual(self.login_status("other", PASSWORD), 200)
+
+    def test_reset_clears_login_lock(self) -> None:
+        self.add_user("member", email="me@example.com", verified=True)
+        for _ in range(5):
+            self.login_status("member", "wrong-password")
+        self.assertEqual(self.login_status("member", PASSWORD), 429)
+        self.request_reset_code("me@example.com")
+        self.assertEqual(self.reset("me@example.com", self.outbox.last_code()).status_code, 204)
+        self.assertEqual(self.login_status("member", NEW_PASSWORD), 200)
 
     def test_admin_list_shows_email_verified(self) -> None:
         self.add_user("boss", role="admin")
