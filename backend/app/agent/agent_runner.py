@@ -41,11 +41,22 @@ async def run_agent_loop(
     persist_message: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     durable_tool: Callable[[ToolRegistry, str, str, str], Awaitable[str]] | None = None,
     evaluation_now: datetime | None = None,
+    on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
     user_id: int,
 ) -> str:
-    """处理一轮用户发言；调用方持有同一会话的 history。工具只操作 user_id 的数据。"""
+    """处理一轮用户发言；调用方持有同一会话的 history。工具只操作 user_id 的数据。
+
+    传入 on_event 时，过程中会发出 ("tool", {"name"}) 与 ("delta", {"text"}) 事件。
+    delta 只是预览：模型之后仍可能调用工具，最终回复也可能被提案汇总替换，以返回值为准。
+    """
     if history is None:
         history = []
+
+    async def emit_delta(text: str) -> None:
+        await on_event("delta", {"text": text})
+
+    # 不需要事件的调用方（/chat、测评、测试替身）保持原来的调用方式。
+    llm_options = {"on_delta": emit_delta} if on_event is not None else {}
 
     registry = ToolRegistry()
     llm_tools = registry.get_llm_tools()
@@ -192,6 +203,8 @@ async def run_agent_loop(
                     continue
                 name = call["function"]["name"]
                 arguments = call["function"]["arguments"]
+                if on_event is not None:
+                    await on_event("tool", {"name": name})
                 try:
                     if durable_tool is None:
                         tool_output = await asyncio.to_thread(
@@ -216,7 +229,9 @@ async def run_agent_loop(
             "content": "请核对本轮用户原话和已返回的提案。还有未处理的独立要求就继续调用工具；"
                        "全部处理完毕就直接回复。不要重复创建已有提案。"
         } if replies else None)
-        result = await ask_llm([*messages, continuation] if continuation else messages, llm_tools)
+        result = await ask_llm(
+            [*messages, continuation] if continuation else messages, llm_tools, **llm_options
+        )
         round_count += 1
         if not result.tool_calls:
             reply = final_reply(result.content)

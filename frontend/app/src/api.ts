@@ -174,10 +174,9 @@ export function onAuthError(handler: (error: ApiError) => void) { authErrorHandl
 
 type RequestOptions = RequestInit & { /** 登录、获取当前用户等接口自己处理 401，不触发统一跳转。 */ handleAuthError?: boolean }
 
-async function request<T>(path: string, { handleAuthError = true, ...init }: RequestOptions = {}): Promise<T> {
-  let response: Response
+async function send(path: string, init: RequestInit): Promise<Response> {
   try {
-    response = await fetch(`${BASE}${path}`, {
+    return await fetch(`${BASE}${path}`, {
       ...init,
       // 会话令牌在 HttpOnly Cookie 中，由浏览器自动携带；前端代码读不到也不保存令牌。
       credentials: 'same-origin',
@@ -186,22 +185,83 @@ async function request<T>(path: string, { handleAuthError = true, ...init }: Req
   } catch {
     throw new Error('无法连接后端，请确认 FastAPI 已启动。')
   }
-  if (!response.ok) {
-    const body = await response.json().catch(() => null)
-    const detail = body?.detail
-    // 反向代理连不上后端时也返回 502/503，但没有后端的 detail；后端自己返回的 502/503（如邮件发送失败）带 detail。
-    if ((response.status === 502 || response.status === 503) && typeof detail !== 'string') {
-      throw new Error('无法连接后端，请确认 FastAPI 已启动。')
-    }
-    let message: string | null = null
-    if (typeof detail === 'string') message = detail
-    else if (Array.isArray(detail)) message = detail.map((item: { msg?: string }) => item.msg).join('；')
-    const error = new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status)
-    if (handleAuthError && response.status === 401) authErrorHandler?.(error)
-    throw error
+}
+
+/** 把非 2xx 响应转换为错误；401 时触发统一的登录跳转。 */
+async function failure(response: Response, handleAuthError: boolean): Promise<Error> {
+  const body = await response.json().catch(() => null)
+  const detail = body?.detail
+  // 反向代理连不上后端时也返回 502/503，但没有后端的 detail；后端自己返回的 502/503（如邮件发送失败）带 detail。
+  if ((response.status === 502 || response.status === 503) && typeof detail !== 'string') {
+    return new Error('无法连接后端，请确认 FastAPI 已启动。')
   }
+  let message: string | null = null
+  if (typeof detail === 'string') message = detail
+  else if (Array.isArray(detail)) message = detail.map((item: { msg?: string }) => item.msg).join('；')
+  const error = new ApiError(message || `请求失败（HTTP ${response.status}）`, response.status)
+  if (handleAuthError && response.status === 401) authErrorHandler?.(error)
+  return error
+}
+
+async function request<T>(path: string, { handleAuthError = true, ...init }: RequestOptions = {}): Promise<T> {
+  const response = await send(path, init)
+  if (!response.ok) throw await failure(response, handleAuthError)
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+export type ChatReply = { answer: string; conversation_id: string; request_id: string }
+
+/** /chat/stream 的过程事件：delta 是回复预览，tool 表示开始调用某个工具（此前的预览作废）。 */
+export type ChatProgress = { event: 'delta'; text: string } | { event: 'tool'; name: string }
+
+/**
+ * 以 SSE 发送一轮对话。EventSource 只支持 GET，这里用 fetch 读取响应体并自行按空行切分事件。
+ * 过程事件交给 onProgress；返回 done 事件中已保存的最终回复，error 事件或连接中断时抛错。
+ */
+async function chatStream(
+  userText: string, requestId: string, conversationId: string | null,
+  onProgress: (progress: ChatProgress) => void,
+): Promise<ChatReply> {
+  const response = await send('/chat/stream', {
+    method: 'POST',
+    body: JSON.stringify({ user_text: userText, request_id: requestId, conversation_id: conversationId }),
+  })
+  if (!response.ok) throw await failure(response, true)
+  if (!response.body) throw new Error('浏览器不支持流式读取')
+
+  const reader = response.body.getReader()
+  // stream: true 让解码器保留被切断在两个分片之间的多字节字符（如中文），等下一片到达再拼。
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+      let boundary: number
+      while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, boundary)
+        buffer = buffer.slice(boundary + 2)
+        let event = 'message'
+        let data = ''
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('data:')) data += line.slice(5).trim()
+        }
+        if (!data) continue
+        const payload = JSON.parse(data)
+        if (event === 'done') return payload as ChatReply
+        if (event === 'error') throw new Error(payload.detail || '本轮对话处理失败，请用原请求重试')
+        if (event === 'delta') onProgress({ event: 'delta', text: payload.text })
+        else if (event === 'tool') onProgress({ event: 'tool', name: payload.name })
+      }
+    }
+  } finally {
+    // 提前返回或出错时释放连接；服务端只会停止推送，本轮仍会执行完并保存。
+    reader.cancel().catch(() => undefined)
+  }
+  throw new Error('连接中断，回复可能仍在生成，请用原请求重试')
 }
 
 export const api = {
@@ -302,10 +362,7 @@ export const api = {
     return request<AuditEventPage>(`/audit/events/page?${params}`)
   },
   auditSummary: (since?: number) => request<AuditSummary>(`/audit/summary${since === undefined ? '' : `?since=${since}`}`),
-  chat: (userText: string, requestId: string, conversationId: string | null) =>
-    request<{ answer: string; conversation_id: string; request_id: string }>('/chat', {
-      method: 'POST', body: JSON.stringify({ user_text: userText, request_id: requestId, conversation_id: conversationId }),
-    }),
+  chatStream,
   deleteConversation: (conversationId: string) => request<void>(`/chat/conversations/${encodeURIComponent(conversationId)}`, {
     method: 'DELETE',
   }),

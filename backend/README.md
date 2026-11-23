@@ -15,7 +15,8 @@
 | 提案 | 独立的查询、确认、取消 API；前端可按当前待确认或会话读取提案；版本冲突、替换、过期和可判定执行失败有明确状态 |
 | 可靠性 | Chat 请求与直接创建的幂等处理、同一会话并发保护、确认与取消的事务竞争 |
 | 留痕 | 对话与工具过程持久化；业务操作写入只追加的审计日志 |
-| 测评 | 26 条场景（含跨用户隔离）、隔离数据库、固定测评时间点、业务规则评分、LLM 回复裁判和人工抽样校准 |
+| 流式输出 | `POST /chat/stream` 以 SSE 推送工具状态与回复预览，最终回复与持久化结果一致；客户端断开不中断本轮 |
+| 测评 | 30 条场景（含跨用户隔离、任务提醒）、隔离数据库、固定测评时间点、业务规则评分、LLM 回复裁判和人工抽样校准 |
 
 ## 项目架构
 
@@ -45,7 +46,7 @@
   ```
 
 ```text
-客户端 ── /chat ── chat_service ── agent_runner ── 模型接口
+客户端 ── /chat、/chat/stream ── chat_service ── agent_runner ── 模型接口
                               │              └─ ToolRegistry
                               │                       │
 客户端 ── /tasks、/actions ────┴─────────────── 业务服务
@@ -57,7 +58,7 @@
 客户端 ── /audit/events、/audit/events/page、/audit/summary ── audit_service ── operation_events
 ```
 
-`/chat` 的每一轮由 `chat_service` 加载历史、运行 Agent，并持久化消息和工具结果。Agent 工具在 `agent/tool_registry.py` 中显式注册；确认和取消提案只通过独立 API 执行。任务和提案 API 直接进入业务服务。服务层处理校验、事务和审计，仓储层负责数据库读写。
+`/chat` 与 `/chat/stream` 的每一轮由 `chat_service` 加载历史、运行 Agent，并持久化消息和工具结果。Agent 工具在 `agent/tool_registry.py` 中显式注册；确认和取消提案只通过独立 API 执行。任务和提案 API 直接进入业务服务。服务层处理校验、事务和审计，仓储层负责数据库读写。
 
 主要目录：
 
@@ -80,6 +81,17 @@ Agent 可以直接创建任务；Agent 提议修改、删除时生成 `pending_a
 提案状态包括 `pending`、`executed`、`cancelled`、`expired`、`replaced`、`conflicted`、`failed`。确认与取消通过事务和条件状态转换争夺同一提案，只有一个请求能生效；确认还会核对任务版本。可判定的执行失败会回滚任务修改并记录 `failed`。手动修改、删除分别写入 `task_updated`、`task_deleted`，提案过期删除写入 `proposal_deleted`；这些事件与业务变更在同一事务中提交。
 
 `POST /chat` 要求客户端为每个新意图生成 UUID `request_id`，重试同一意图时复用该值。已完成的重复请求返回先前结果；正在处理的重复请求返回 409。一个会话同一时间只处理一轮，进程中断后的请求可在租约到期后恢复。直接调用 `POST /tasks` 时，使用 UUID 格式的 `Idempotency-Key` 请求头；相同键与相同请求体复用首次创建结果，相同键配不同请求体返回 409。
+
+`POST /chat/stream` 的请求体、`request_id` 规则与 `POST /chat` 相同，响应为 `text/event-stream`，事件的 `data` 均为 JSON：
+
+| 事件 | data | 含义 |
+| --- | --- | --- |
+| `tool` | `{"name"}` | 即将执行某个工具；此前的 `delta` 只是过渡语，客户端应清空预览 |
+| `delta` | `{"text"}` | 模型输出的回复片段，仅作预览 |
+| `done` | `{"conversation_id", "answer", "request_id"}` | 本轮结束；`answer` 是已持久化的最终回复（生成提案时为服务端汇总，可能与预览不同） |
+| `error` | `{"detail"}` | 本轮失败；可用同一 `request_id` 重试 |
+
+校验、额度、会话归属、请求 ID 冲突等错误在开始推送前以 HTTP 状态码返回。Agent 在独立任务中运行，客户端断开只停止推送，本轮仍会执行完并保存，之后用同一 `request_id` 重试会直接收到 `done`。模型接口始终以流式读取（`agent/llm.py`），未收到 `finish_reason` 的不完整输出按失败处理。
 
 `DELETE /chat/conversations/{conversation_id}` 删除会话消息和已完成的请求记录；正在处理的会话返回 409。删除后只保留已用请求 ID 的无内容标记，旧请求重试返回 410，不会再次执行工具。任务、提案和操作审计不随会话删除。
 
@@ -130,6 +142,7 @@ python -m backend.app.main
 | `GET /notifications`、`GET /notifications/unread-count` | 通知列表（新的在前，`limit`、`before_id`）；未读数 |
 | `POST /notifications/{id}/read`、`POST /notifications/read-all` | 标为已读 |
 | `POST /chat` | 发送一轮自然语言消息；请求包含 `request_id`、`user_text`，后续轮次带上 `conversation_id` |
+| `POST /chat/stream` | 同 `POST /chat`，以 SSE 返回 `tool`、`delta`、`done`、`error` 事件 |
 | `DELETE /chat/conversations/{conversation_id}` | 删除会话与消息；处理中的会话不可删除，任务与审计保留 |
 | `POST /tasks` | 直接创建任务；请求头包含 `Idempotency-Key` |
 | `GET /tasks`、`GET /tasks/{task_id}` | 查询任务 |
@@ -225,4 +238,4 @@ python -m backend.app.evals.calibration compare backend/evals/reviews/all-review
 python -m unittest discover -s backend/tests -v
 ```
 
-生产对话自动转为测评候选案例的流程尚未实现；目前的 26 条测评场景由人工维护。
+生产对话自动转为测评候选案例的流程尚未实现；目前的 30 条测评场景由人工维护。

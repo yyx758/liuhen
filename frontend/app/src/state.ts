@@ -30,6 +30,8 @@ export const state = reactive({
   editorTaskId: null as number | null,
   editorOpen: false,
   detailTaskId: null as number | null,
+  /** 正在生成的回复预览：text 为模型已输出的文字，tool 为正在调用的工具；仅用于展示，以 done 的回复为准。 */
+  chatPreview: { text: '', tool: null as string | null },
 })
 
 export function saveChats() {
@@ -43,6 +45,7 @@ export function clearUserData() {
   Object.assign(state, {
     tasks: [], actions: [], events: [], chats: [], activeChatId: null,
     error: '', toast: '', editorTaskId: null, editorOpen: false, detailTaskId: null,
+    chatPreview: { text: '', tool: null },
   })
 }
 
@@ -105,10 +108,20 @@ export async function sendChat(text: string, retry?: ChatMessage) {
   saveChats()
   state.busy = true
   state.error = ''
+  state.chatPreview = { text: '', tool: null }
   try {
-    const response = await api.chat(text, requestId, chat.conversationId)
+    const response = await api.chatStream(text, requestId, chat.conversationId, progress => {
+      if (progress.event === 'delta') {
+        state.chatPreview.text += progress.text
+      } else {
+        // 模型决定调用工具：之前的文字只是过渡语，清空后显示工具状态。
+        state.chatPreview = { text: '', tool: progress.name }
+      }
+    })
     chat.conversationId = response.conversation_id
     chat.messages.push({ role: 'assistant', text: response.answer, requestId })
+    // 已保存的回复取代预览，避免刷新任务列表期间同一段文字显示两遍。
+    state.chatPreview = { text: '', tool: null }
     saveChats()
     await refresh()
     return true
@@ -117,5 +130,8 @@ export async function sendChat(text: string, retry?: ChatMessage) {
     saveChats()
     state.error = error instanceof Error ? error.message : '发送失败'
     return false
-  } finally { state.busy = false }
+  } finally {
+    state.busy = false
+    state.chatPreview = { text: '', tool: null }
+  }
 }

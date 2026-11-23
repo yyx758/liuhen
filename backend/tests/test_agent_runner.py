@@ -72,6 +72,49 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages_seen[1][-1]["tool_call_id"], "call_1")
         return answer, messages_seen[1]
 
+    async def test_on_event_reports_tool_calls_and_text_deltas_in_order(self) -> None:
+        arguments = json.dumps(
+            {"title": "写周报", "start_at": "2030-01-02T14:00:00+08:00"}, ensure_ascii=False
+        )
+        call = {"id": "call_1", "type": "function",
+                "function": {"name": "create_task", "arguments": arguments}}
+        rounds = []
+
+        async def fake_ask_llm(messages, tools, *, on_delta):
+            rounds.append(len(messages))
+            if len(rounds) == 1:
+                # 工具调用前的过渡文字也会作为 delta 发出，由前端在 tool 事件后清掉。
+                await on_delta("我来创建")
+                return LLMResult(
+                    content="我来创建",
+                    assistant_message={"role": "assistant", "content": "我来创建", "tool_calls": [call]},
+                    tool_calls=[call],
+                )
+            for part in ["已创建", "写周报"]:
+                await on_delta(part)
+            return LLMResult(
+                content="已创建写周报",
+                assistant_message={"role": "assistant", "content": "已创建写周报"},
+            )
+
+        events = []
+
+        async def on_event(event: str, data: dict) -> None:
+            events.append((event, data))
+
+        with patch.object(agent_runner, "ask_llm", side_effect=fake_ask_llm):
+            answer = await agent_runner.run_agent_loop(
+                "后天下午两点写周报", [], on_event=on_event, user_id=self.user_id
+            )
+
+        self.assertEqual(answer, "已创建写周报")
+        self.assertEqual(events, [
+            ("delta", {"text": "我来创建"}),
+            ("tool", {"name": "create_task"}),
+            ("delta", {"text": "已创建"}),
+            ("delta", {"text": "写周报"}),
+        ])
+
     async def test_create_task_reports_actual_result(self) -> None:
         answer, messages = await self.run_with_tool_call("学习 Python", "已创建学习 Python 任务")
 
