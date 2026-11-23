@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import type { Task } from '../api'
-import { sortTasks, taskDate, taskTime, today } from '../format'
+import { localParts, sortTasks, taskDate, taskTime, today } from '../format'
 import { sendChat, state } from '../state'
 import TaskRow from '../components/TaskRow.vue'
 import Icon from '../components/Icon.vue'
@@ -25,10 +25,21 @@ const nowLeft = `${(nowHour - 8) / 14 * 100}%`
 function isAiTask(task: Task) {
   return Boolean(task.created_by_agent)
 }
-function slotStyle(task: Task) {
-  const time = taskTime(task)
-  const hour = Number(time.slice(0, 2)) + Number(time.slice(3, 5)) / 60
-  return { left: `${(hour - 8) / 14 * 100}%`, width: `${Math.min(Math.max((task.duration_minutes || 0) / 60 / 14 * 100, 8), 22)}%` }
+// 时间轴：今天开始的任务放在开始时间；今天截止（且不是今天开始）的任务放在截止时间并标注"截止"。
+type TimelineSlot = { task: Task; time: string; due: boolean }
+const timeline = computed<TimelineSlot[]>(() => state.tasks.filter(task => task.status === 'todo').flatMap(task => {
+  const start = localParts(task.start_at)
+  if (start?.date === today()) return [{ task, time: start.time, due: false }]
+  const due = localParts(task.due_at)
+  return due?.date === today() ? [{ task, time: due.time, due: true }] : []
+}).sort((a, b) => a.time.localeCompare(b.time)))
+
+function slotStyle(slot: TimelineSlot) {
+  const hour = Number(slot.time.slice(0, 2)) + Number(slot.time.slice(3, 5)) / 60
+  const width = slot.due ? 8 : Math.min(Math.max((slot.task.duration_minutes || 0) / 60 / 14 * 100, 8), 22)
+  // 时间轴只画 08:00–22:00；范围外的（如 23:59 截止）贴在两端，不能被挤出可视区域。
+  const left = Math.max((hour - 8) / 14 * 100, 0)
+  return { left: `min(${left}%, calc(100% - max(${width}%, 80px)))`, width: `${width}%` }
 }
 function eventLabel(eventType: string) {
   const labels: Record<string, string> = {
@@ -75,8 +86,8 @@ async function submit() {
           <div class="timeline-wrap"><div class="timeline">
             <div class="timeline-hours"><span v-for="hour in 14" :key="hour">{{ String(hour + 7).padStart(2, '0') }}</span></div>
             <div v-if="nowHour >= 8 && nowHour <= 22" class="timeline-now" :style="{ left: nowLeft }"><span>现在</span></div>
-            <button v-for="task in todo.filter(item => item.start_at)" :key="task.id" type="button" class="slot" :class="{ ai: isAiTask(task), important: !isAiTask(task) && task.priority === 'high' }" :style="slotStyle(task)" @click="state.detailTaskId = task.id"><strong>{{ taskTime(task) }}</strong>{{ task.title }}</button>
-            <div v-if="!todo.some(item => item.start_at)" class="timeline-empty">今天的安排还很轻松。</div>
+            <button v-for="slot in timeline" :key="slot.task.id" type="button" class="slot" :class="{ ai: isAiTask(slot.task), important: !isAiTask(slot.task) && slot.task.priority === 'high' }" :style="slotStyle(slot)" @click="state.detailTaskId = slot.task.id"><strong>{{ slot.due ? `${slot.time} 截止` : slot.time }}</strong>{{ slot.task.title }}</button>
+            <div v-if="!timeline.length" class="timeline-empty">今天的安排还很轻松。</div>
           </div></div>
           <div class="timeline-footnote"><span class="highlight">黄色</span> 是小记帮你安排的时间，可以随时调整。</div>
         </section>
