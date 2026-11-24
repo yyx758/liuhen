@@ -8,7 +8,8 @@ class OperationEventRead(BaseModel):
 
     id: int
     event_type: str
-    task_id: int
+    task_id: int | None
+    document_id: int | None = None
     action_id: int | None
     request_id: str | None
     conversation_id: str | None

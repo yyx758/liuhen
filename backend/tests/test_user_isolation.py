@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.agent.tool_registry import ToolRegistry
-from backend.app.api import actions, audit, chat, tasks
+from backend.app.api import actions, audit, chat, documents, tasks
 from backend.app.api.deps import current_session_user, current_user, current_user_id, require_admin
 from backend.app.db.isolated import create_user, isolated_engine
 from backend.app.db.session import get_db
@@ -69,7 +69,7 @@ class UserIsolationTests(unittest.TestCase):
             ))
 
         api = FastAPI()
-        for module in (tasks, actions, chat, audit):
+        for module in (tasks, actions, chat, audit, documents):
             api.include_router(module.router)
 
         def test_db():
@@ -144,6 +144,52 @@ class UserIsolationTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/chat/conversations/{self.conversation_id}").status_code, 404)
         with self.factory() as session:
             self.assertIsNotNone(session.get(ConversationORM, self.conversation_id))
+
+    def alice_document(self):
+        """A 的一篇带图片和互链的笔记，以及一个用过的幂等键。"""
+        from backend.app.schemas.document import DocumentCreate
+        from backend.app.services import document_service, image_service
+
+        with Session(self.engine) as session:
+            image = image_service.upload_image(session, b"\x89PNG\r\n\x1a\nalice", "a.png", user_id=self.alice)
+        key = str(uuid4())
+        with Session(self.engine) as session:
+            document = document_service.create_document(session, DocumentCreate(
+                title="A 的私密笔记", category="A 的分类", content=f"A 的看门狗 ![图]({image.url})",
+            ), key, user_id=self.alice)
+        return document, image, key
+
+    def test_documents_of_others_look_missing(self) -> None:
+        document, image, key = self.alice_document()
+        self.assertEqual(self.client.get(f"/documents/{document.id}").status_code, 404)
+        self.assertEqual(self.client.patch(
+            f"/documents/{document.id}", headers={"If-Match": "1"}, json={"title": "B 改的"}
+        ).status_code, 404)
+        self.assertEqual(self.client.delete(f"/documents/{document.id}", headers={"If-Match": "1"}).status_code, 404)
+        self.assertEqual(self.client.get(image.url).status_code, 404)
+        self.assertEqual(self.client.get("/documents").json()["items"], [])
+        self.assertEqual(self.client.get("/documents/categories").json(), [])
+        self.assertEqual(self.client.get("/documents/search", params={"q": "看门狗"}).json(), [])
+        self.assertEqual(self.client.get("/documents", params={"before_id": document.id}).status_code, 422)
+
+        # B 写一篇链接到 A 的笔记标题的文档：互链解析不到 A 的文档。
+        created = self.client.post("/documents", headers={"Idempotency-Key": str(uuid4())},
+                                   json={"title": "B 的", "content": "[[A 的私密笔记]]"}).json()
+        links = self.client.get(f"/documents/{created['id']}").json()["links"]
+        self.assertEqual(links[0]["document_ids"], [])
+
+        # 别人的幂等键：409，不回放内容。
+        replay = self.client.post("/documents", headers={"Idempotency-Key": key},
+                                  json={"title": "A 的私密笔记", "category": "A 的分类", "content": "x"})
+        self.assertEqual(replay.status_code, 409)
+        self.assertNotIn("私密", replay.text)
+
+        # 审计里看不到 A 的文档事件。
+        self.assertEqual(self.client.get("/audit/events", params={"document_id": document.id}).json(), [])
+
+        self.as_user = self.alice
+        self.assertEqual(self.client.get(f"/documents/{document.id}").json()["title"], "A 的私密笔记")
+        self.assertEqual(self.client.get(image.url).status_code, 200)
 
     def test_audit_only_shows_own_events(self) -> None:
         self.assertEqual(self.client.get("/audit/events").json(), [])

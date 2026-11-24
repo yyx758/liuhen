@@ -159,6 +159,7 @@ class ChatApiTests(unittest.IsolatedAsyncioTestCase):
                     "conversation_id": conversation_id,
                     "answer": replies[1],
                     "request_id": second_request_id,
+                    "sources": [],
                 })
 
                 empty = await client.post("/chat", json={

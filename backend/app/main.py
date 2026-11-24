@@ -6,12 +6,13 @@ from contextlib import asynccontextmanager, suppress
 import uvicorn
 from fastapi import FastAPI
 
-from backend.app.api import admin, auth, tasks, actions, chat, audit, notifications
+from backend.app.api import admin, auth, tasks, actions, chat, audit, documents, notifications
 from backend.app.api.security import check_origin
 from backend.app.db.migrations import ensure_schema_current
 from backend.app.db.session import engine
 from backend.app.db.session import SessionLocal
-from backend.app.services import action_service, auth_service, reminder_service
+from backend.app.config.settings import IMAGE_CLEANUP_INTERVAL_SECONDS
+from backend.app.services import action_service, auth_service, image_service, reminder_service
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,21 @@ async def reminder_loop() -> None:
         await asyncio.sleep(30)
 
 
+def cleanup_images() -> int:
+    with SessionLocal() as session:
+        return image_service.cleanup_unreferenced_images(session)
+
+
+async def image_cleanup_loop() -> None:
+    """每小时删除超过 24 小时、且没有任何本人文档引用的图片（PRD D24）。"""
+    while True:
+        try:
+            await asyncio.to_thread(cleanup_images)
+        except Exception:
+            logger.exception("图片清理失败")
+        await asyncio.sleep(IMAGE_CLEANUP_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -66,10 +82,11 @@ async def lifespan(app: FastAPI):
     ensure_schema_current(engine)
     expiry_task = asyncio.create_task(expiry_loop())
     reminder_task = asyncio.create_task(reminder_loop())
+    image_cleanup_task = asyncio.create_task(image_cleanup_loop())
     try:
         yield
     finally:
-        for task in (expiry_task, reminder_task):
+        for task in (expiry_task, reminder_task, image_cleanup_task):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
@@ -90,6 +107,7 @@ app.include_router(tasks.router)
 app.include_router(actions.router)
 app.include_router(chat.router)
 app.include_router(audit.router)
+app.include_router(documents.router)
 app.include_router(notifications.router)
 
 

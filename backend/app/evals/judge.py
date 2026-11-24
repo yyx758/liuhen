@@ -99,6 +99,8 @@ def judge_material(result: dict) -> dict:
             "actions": result.get("actions", []),
             "external_api_results": result.get("external_events", []),
             "tool_calls_and_results": tool_evidence(result),
+            # 服务端按本轮读过的片段生成的来源卡片，用来核对回复里"见某某笔记"之类的说法。
+            "document_sources": [turn.get("sources") or [] for turn in result.get("turns", [])],
             "run_error": result.get("run_error"),
         },
         "agent_replies": [

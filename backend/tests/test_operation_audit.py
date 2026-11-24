@@ -293,3 +293,49 @@ class OperationAuditTests(unittest.IsolatedAsyncioTestCase):
                 )
         finally:
             app.dependency_overrides.clear()
+
+
+class DocumentAuditTests(unittest.TestCase):
+    """文档事件（spec 2.7）：写入、标题、按文档和类别过滤，与任务事件共存。"""
+
+    def setUp(self) -> None:
+        self.database = isolated_engine()
+        self.engine = self.database.__enter__()
+        self.user_id = create_user(self.engine, "alice")
+
+    def tearDown(self) -> None:
+        self.database.__exit__(None, None, None)
+
+    def test_document_events_are_listed_with_titles_and_filters(self) -> None:
+        from backend.app.schemas.document import DocumentCreate, DocumentUpdate
+        from backend.app.services import document_service
+
+        with Session(self.engine) as session:
+            task_service.create_task(
+                TaskCreate(title="任务", due_at="2030-01-02T14:00:00+08:00"), session, user_id=self.user_id
+            )
+        with Session(self.engine) as session:
+            document = document_service.create_document(
+                session, DocumentCreate(title="笔记", content="正文"), user_id=self.user_id
+            )
+        with Session(self.engine) as session:
+            document_service.update_document(
+                session, document.id, DocumentUpdate(title="改名的笔记"), 1, user_id=self.user_id
+            )
+
+        with Session(self.engine) as session:
+            all_events = audit_service.list_events(session, user_id=self.user_id)
+            documents_only = audit_service.list_events(session, user_id=self.user_id, category="documents")
+            by_document = audit_service.list_events(session, user_id=self.user_id, document_id=document.id)
+            page = audit_service.page_events(session, user_id=self.user_id, page=1, page_size=10, category="documents")
+            summary = audit_service.summary(session, user_id=self.user_id)
+
+        self.assertEqual([e.event_type for e in all_events], ["document_updated", "document_created", "task_created"])
+        self.assertEqual([e.event_type for e in documents_only], ["document_updated", "document_created"])
+        self.assertEqual([e.event_type for e in by_document], ["document_updated", "document_created"])
+        self.assertEqual(page.total, 2)
+        created = by_document[1]
+        self.assertEqual((created.task_id, created.document_id, created.subject_title), (None, document.id, "笔记"))
+        self.assertEqual(by_document[0].subject_title, "笔记")  # 修改事件取修改前的标题
+        self.assertEqual(all_events[2].document_id, None)
+        self.assertEqual((summary.total, summary.proposals), (3, 0))

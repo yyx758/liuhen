@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import { api, type Action, type AuditEvent, type AuditSummary } from '../api'
 import { localParts, proposalChanges } from '../format'
 import { refresh, state } from '../state'
 
-type Filter = 'all' | 'pending' | 'failed' | 'cancelled'
+type Filter = 'all' | 'pending' | 'failed' | 'cancelled' | 'documents'
 
 const route = useRoute()
 const filter = ref<Filter>(route.query.filter === 'pending' ? 'pending' : 'all')
@@ -29,7 +29,10 @@ const filters: { key: Filter; label: string }[] = [
   { key: 'pending', label: '需要确认' },
   { key: 'failed', label: '失败' },
   { key: 'cancelled', label: '已取消' },
+  { key: 'documents', label: '文档' },
 ]
+const DOCUMENT_EVENTS = new Set(['document_created', 'document_updated', 'document_deleted'])
+const isDocumentEvent = (event: AuditEvent) => DOCUMENT_EVENTS.has(event.event_type)
 
 const proposalTitleByAction = computed(() => {
   const result = new Map<number, string>()
@@ -55,7 +58,7 @@ const pendingActions = computed(() => new Set(state.actions.filter(action =>
 const pendingEvents = computed<AuditEvent[]>(() => state.actions.filter(action =>
   pendingActions.value.has(action.id) && (since.value === undefined || new Date(action.created_at).getTime() / 1000 >= since.value),
 ).map(action => ({
-  id: -action.id, event_type: 'proposal_created', task_id: action.task_id,
+  id: -action.id, event_type: 'proposal_created', task_id: action.task_id, document_id: null,
   action_id: action.id, request_id: action.request_id || null,
   conversation_id: null, tool_call_id: null, from_status: null, to_status: 'pending',
   reason: null, details: null, created_at: action.created_at,
@@ -96,7 +99,7 @@ async function loadPage(requestedPage = 1, resetSnapshot = false) {
   try {
     const page = await api.eventPage(
       requestedPage, pageSize, since.value,
-      filter.value === 'failed' || filter.value === 'cancelled' ? filter.value : 'all',
+      filter.value, // 'pending' 已在上面提前返回
       anchorId.value ?? undefined,
     )
     if (current !== pageRequest) return
@@ -155,7 +158,20 @@ function titleIn(details: Record<string, unknown> | null, key: string): string |
 function taskTitle(event: AuditEvent) {
   return event.subject_title || titleIn(event.details, 'task') || titleIn(event.details, 'before') || titleIn(event.details, 'after')
     || (event.action_id !== null ? proposalTitleByAction.value.get(event.action_id) : null)
-    || state.tasks.find(task => task.id === event.task_id)?.title || `待办 #${event.task_id}`
+    || state.tasks.find(task => task.id === event.task_id)?.title
+    || (event.task_id !== null ? `待办 #${event.task_id}` : `笔记 #${event.document_id}`)
+}
+/** 文档修改事件的改动说明：标题、分类显示前后值，正文只显示字数变化（不保存正文）。 */
+function documentChanges(event: AuditEvent): string[] {
+  if (event.event_type !== 'document_updated') return []
+  const before = (event.details?.before ?? {}) as Record<string, unknown>
+  const after = (event.details?.after ?? {}) as Record<string, unknown>
+  const changed = Array.isArray(event.details?.changed) ? event.details.changed as string[] : []
+  const text = (value: unknown) => typeof value === 'string' && value ? value : '无'
+  return changed.map(field => field === 'title' ? `标题：${text(before.title)} → ${text(after.title)}`
+    : field === 'category' ? `分类：${text(before.category)} → ${text(after.category)}`
+    : field === 'content' ? `正文：${before.content_chars ?? '—'} 字 → ${after.content_chars ?? '—'} 字`
+    : field)
 }
 function description(event: AuditEvent) {
   const title = taskTitle(event)
@@ -171,10 +187,14 @@ function description(event: AuditEvent) {
     proposal_conflicted: `执行冲突：${title}`,
     proposal_failed: `执行失败：${title}`,
     proposal_deleted: `清理过期提案：${title}`,
+    document_created: `新建笔记「${title}」`,
+    document_updated: `修改笔记「${title}」`,
+    document_deleted: `删除笔记「${title}」`,
   }
   return labels[event.event_type] || `记录操作：${title}`
 }
 function actor(event: AuditEvent) {
+  if (isDocumentEvent(event)) return '你'
   if (event.event_type === 'proposal_expired' || event.event_type === 'proposal_deleted') return '系统'
   if (event.event_type === 'proposal_replaced' && event.details?.manual_operation) return '你'
   if (event.event_type === 'proposal_created' || event.event_type === 'proposal_replaced') return '小记'
@@ -189,7 +209,8 @@ function status(event: AuditEvent) {
   }
   if (event.event_type === 'proposal_failed' || event.event_type === 'proposal_conflicted') return { label: '失败', className: 'error' }
   if (event.event_type === 'proposal_cancelled' || event.event_type === 'proposal_expired' || event.event_type === 'proposal_replaced' || event.event_type === 'proposal_deleted') return { label: { proposal_cancelled: '已取消', proposal_expired: '已过期', proposal_replaced: '已替换', proposal_deleted: '已清理' }[event.event_type] || '已结束', className: 'muted' }
-  return { label: event.event_type === 'task_created' ? '已创建' : '已执行', className: 'ok' }
+  const done: Record<string, string> = { task_created: '已创建', document_created: '已创建', document_updated: '已修改', document_deleted: '已删除' }
+  return { label: done[event.event_type] || '已执行', className: 'ok' }
 }
 function eventTime(value: string) {
   const date = new Date(value)
@@ -239,7 +260,7 @@ async function decide(event: AuditEvent, decision: 'confirm' | 'cancel') {
 
 <template>
   <main class="audit-page page">
-    <div class="audit-heading"><h1>留痕</h1><p>每一次任务操作和提案流转，都有记录可查。</p></div>
+    <div class="audit-heading"><h1>留痕</h1><p>每一次任务、笔记操作和提案流转，都有记录可查。</p></div>
     <div class="audit-metrics" aria-label="操作概览">
       <div><strong>{{ summary?.total ?? '—' }}</strong><span>操作记录</span></div>
       <div><strong>{{ summary?.proposals ?? '—' }}</strong><span>提案 · 确认 {{ summary?.executed ?? '—' }} / 取消 {{ summary?.cancelled ?? '—' }} / 过期 {{ summary?.expired ?? '—' }}</span></div>
@@ -257,9 +278,14 @@ async function decide(event: AuditEvent, decision: 'confirm' | 'cancel') {
         <div class="audit-row" :class="{ expanded: expandedId === event.id }">
           <time :datetime="event.created_at">{{ eventTime(event.created_at) }}</time>
           <span class="audit-actor" :class="{ ai: actor(event) === '小记' }">{{ actor(event) }}</span>
-          <span class="audit-description">{{ description(event) }}</span>
+          <span class="audit-description">
+            <RouterLink v-if="isDocumentEvent(event) && event.document_id !== null && event.event_type !== 'document_deleted'" :to="`/library/${event.document_id}`">{{ description(event) }}</RouterLink>
+            <template v-else>{{ description(event) }}</template>
+            <span v-for="change in documentChanges(event)" :key="change" class="audit-change-line">{{ change }}</span>
+          </span>
           <span class="audit-status" :class="status(event).className">{{ status(event).label }}</span>
-          <button type="button" class="audit-trace" :aria-expanded="expandedId === event.id" @click="openRow(event)">{{ expandedId === event.id ? '收起' : pendingAction(event) ? '处理' : '轨迹' }}</button>
+          <span v-if="isDocumentEvent(event)" />
+          <button v-else type="button" class="audit-trace" :aria-expanded="expandedId === event.id" @click="openRow(event)">{{ expandedId === event.id ? '收起' : pendingAction(event) ? '处理' : '轨迹' }}</button>
         </div>
         <div v-if="expandedId === event.id" class="audit-detail">
           <div v-if="pendingAction(event)" class="audit-decision">
@@ -268,7 +294,7 @@ async function decide(event: AuditEvent, decision: 'confirm' | 'cancel') {
             <div v-for="change in proposalChangesFor(event)" :key="change.label" class="audit-change"><span>{{ change.label }}</span><div class="diff-columns"><div class="diff-col"><span class="tiny">修改前</span><b>{{ change.before }}</b></div><span class="diff-arrow">→</span><div class="diff-col new"><span class="tiny">修改后</span><b>{{ change.after }}</b></div></div></div>
             <div class="diff-actions"><button class="solid" type="button" :disabled="state.busy" @click="decide(event, 'confirm')">{{ pendingAction(event)?.action_type === 'delete' ? '确认删除' : '确认修改' }}</button><button class="outline" type="button" :disabled="state.busy" @click="decide(event, 'cancel')">保持原样</button></div>
           </div>
-          <div class="audit-trace-meta"><span v-if="event.id > 0">记录 #{{ event.id }}</span><span>待办 #{{ event.task_id }}</span><span v-if="event.action_id !== null">提案 #{{ event.action_id }}</span></div>
+          <div class="audit-trace-meta"><span v-if="event.id > 0">记录 #{{ event.id }}</span><span v-if="event.task_id !== null">待办 #{{ event.task_id }}</span><span v-if="event.document_id !== null">笔记 #{{ event.document_id }}</span><span v-if="event.action_id !== null">提案 #{{ event.action_id }}</span></div>
           <p v-if="event.reason" class="audit-reason">{{ event.reason }}</p>
           <div class="audit-trace-lines">
             <div v-if="event.request_id"><b>请求 ID</b><span>{{ event.request_id }}</span></div>

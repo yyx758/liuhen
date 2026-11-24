@@ -11,12 +11,13 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.config.env import get_judge_config, get_model_config
 from backend.app.config.settings import USER_TIMEZONE
 from backend.app.db.isolated import isolated_engine
-from backend.app.evals.grading import score_business
+from backend.app.evals.grading import DOCUMENT_CASES, marker_stats, score_business, tool_names
 from backend.app.evals.judge import judge_reply
 from backend.app.evals.scenarios import (
     CASE_MESSAGES, CASE_NAMES, ScenarioContext, execute_case, seed_case,
 )
 from backend.app.models.action import PendingActionORM
+from backend.app.models.document import DocumentORM
 from backend.app.models.conversation import ConversationORM, ConversationMessageORM  # register tables
 from backend.app.models.operation_event import OperationEventORM
 from backend.app.models.request import ChatTurnORM, TaskCreateRequestORM  # register tables
@@ -52,6 +53,8 @@ def collect_state(session_factory, turns: list[dict], *, user_id: int, other_use
             if stored is not None:
                 entry["status"] = stored.status
                 entry["messages"] = stored.messages
+                # 来源卡片（spec 3.4）；最终回复原文（带来源标记）是 messages 的最后一条。
+                entry["sources"] = stored.sources or []
                 if entry.get("reply") is None:
                     entry["reply"] = stored.answer
 
@@ -67,6 +70,13 @@ def collect_state(session_factory, turns: list[dict], *, user_id: int, other_use
                 for action in session.scalars(
                     select(PendingActionORM).where(PendingActionORM.user_id == owner).order_by(PendingActionORM.id)
                 )
+            ]
+
+        def documents_of(owner: int) -> list[dict]:
+            # 不取正文：用版本和正文哈希判断有没有被改动（Agent 对文档只读，D6）。
+            return [
+                {"id": d.id, "title": d.title, "category": d.category, "version": d.version, "content_hash": d.content_hash}
+                for d in session.scalars(select(DocumentORM).where(DocumentORM.user_id == owner).order_by(DocumentORM.id))
             ]
 
         tasks = tasks_of(user_id)
@@ -96,8 +106,11 @@ def collect_state(session_factory, turns: list[dict], *, user_id: int, other_use
             select(OperationEventORM.event_type).where(OperationEventORM.user_id == other_user_id)
         ).all()
         return {
-            "tasks": tasks, "actions": actions, "audit_events": audit_events,
-            "other_user": {"tasks": tasks_of(other_user_id), "actions": actions_of(other_user_id), "audit_events": list(other_audit)},
+            "tasks": tasks, "actions": actions, "audit_events": audit_events, "documents": documents_of(user_id),
+            "other_user": {
+                "tasks": tasks_of(other_user_id), "actions": actions_of(other_user_id),
+                "audit_events": list(other_audit), "documents": documents_of(other_user_id),
+            },
         }
 
 
@@ -117,6 +130,9 @@ async def run_case(
         context = ScenarioContext(session_factory, run_now, race_preference)
         initial_tasks = []
         initial_other_tasks = []
+        initial_documents = []
+        initial_other_documents = []
+        initial_other_audit = []
         run_error = None
         owners = {"user_id": context.user_id, "other_user_id": context.other_user_id}
         try:
@@ -124,6 +140,9 @@ async def run_case(
             initial = collect_state(session_factory, [], **owners)
             initial_tasks = initial["tasks"]
             initial_other_tasks = initial["other_user"]["tasks"]
+            initial_documents = initial["documents"]
+            initial_other_documents = initial["other_user"]["documents"]
+            initial_other_audit = initial["other_user"]["audit_events"]
             await execute_case(case_id, context)
         except Exception as exc:
             run_error = f"{type(exc).__name__}: {exc}"
@@ -147,7 +166,13 @@ async def run_case(
             "tasks": final_state["tasks"],
             "actions": final_state["actions"],
             "audit_events": final_state["audit_events"],
-            "other_user": {**final_state["other_user"], "initial_tasks": initial_other_tasks},
+            "initial_documents": initial_documents,
+            "documents": final_state["documents"],
+            "other_user": {
+                **final_state["other_user"], "initial_tasks": initial_other_tasks,
+                "initial_documents": initial_other_documents,
+                "initial_audit_events": initial_other_audit,
+            },
             "run_error": run_error,
             # Keep the single-turn fields convenient for the first case.
             "request_id": last_turn.get("request_id"),
@@ -187,6 +212,38 @@ def summarize(report: dict) -> None:
         "judge_skipped_count": sum(bool(r.get("agent_reply_quality", {}).get("skipped")) for r in results),
         "unstable_or_failing": {
             key: f"{sum(passes)}/{len(passes)}" for key, passes in groups.items() if not all(passes)
+        },
+        **document_summary(results),
+    }
+
+
+def document_summary(results: list[dict]) -> dict:
+    """文档场景（spec 5.5）：来源标记的写法统计，以及多跳类场景的工具调用次数（D29 据此决定是否调整循环上限）。"""
+    documents = [r for r in results if r["case_id"] in DOCUMENT_CASES]
+    if not documents:
+        return {}
+    markers = {"strict": 0, "loose": 0, "unread": 0}
+    for result in documents:
+        for key, value in marker_stats(result).items():
+            markers[key] += value
+    tool_counts: dict[str, list[tuple[int, int]]] = {}
+    for result in documents:
+        if result["case_id"] >= "40":
+            calls = len(tool_names(result))
+            rounds = sum(
+                message.get("role") == "assistant"
+                for turn in result.get("turns", []) for message in turn.get("messages", [])
+            )
+            tool_counts.setdefault(result["case_id"], []).append((calls, rounds))
+    return {
+        "document_markers": markers,
+        "document_tool_calls": {
+            case_id: {
+                "calls_mean": round(sum(c for c, _ in runs) / len(runs), 2),
+                "calls_max": max(c for c, _ in runs),
+                "rounds_mean": round(sum(r for _, r in runs) / len(runs), 2),
+            }
+            for case_id, runs in sorted(tool_counts.items())
         },
     }
 

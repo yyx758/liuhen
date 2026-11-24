@@ -45,7 +45,7 @@ def main() -> None:
     assert fetch(anonymous, "/docs")[0] == 404
 
     # 业务接口必须先登录。
-    for path in ("/tasks", "/audit/summary", "/auth/me", "/admin/users", "/notifications/unread-count"):
+    for path in ("/tasks", "/audit/summary", "/auth/me", "/admin/users", "/notifications/unread-count", "/documents"):
         status, body = fetch(anonymous, path)
         assert status == 401 and json.loads(body)["detail"] == "请先登录", path
     # 缺少 Origin 的登录请求被拒绝（CSRF 防护）。
@@ -67,7 +67,7 @@ def main() -> None:
         me = json.loads(fetch(user, "/auth/me")[1])
         assert me["username"] == username.strip().lower() and "chat_usage" in me
         assert not me["must_change_password"], "该账号需要先修改密码"
-        for path in ("/tasks", "/audit/summary", "/auth/sessions", "/notifications/unread-count"):
+        for path in ("/tasks", "/audit/summary", "/auth/sessions", "/notifications/unread-count", "/documents"):
             assert fetch(user, path)[0] == 200, path
         admin_status = fetch(user, "/admin/users/pending-count")[0]
         assert admin_status == (200 if me["role"] == "admin" else 403), admin_status

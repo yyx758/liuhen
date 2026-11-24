@@ -50,7 +50,10 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
             if not messages_seen:
                 self.assertEqual(
                     {tool["function"]["name"] for tool in tools},
-                    {"create_task", "list_tasks", "get_task", "get_action", "propose_update", "propose_delete"},
+                    {
+                        "create_task", "list_tasks", "get_task", "get_action", "propose_update", "propose_delete",
+                        "search_documents", "read_document", "list_documents",
+                    },
                 )
                 messages_seen.append(list(messages))
                 return LLMResult(

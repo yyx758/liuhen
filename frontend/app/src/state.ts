@@ -1,7 +1,14 @@
 import { reactive } from 'vue'
-import { api, type Action, type AuditEvent, type Task } from './api'
+import { api, type Action, type AuditEvent, type DocumentSource, type Task } from './api'
 
-export type ChatMessage = { role: 'user' | 'assistant'; text: string; requestId?: string; failed?: boolean }
+export type ChatMessage = {
+  role: 'user' | 'assistant'
+  text: string
+  requestId?: string
+  failed?: boolean
+  /** 资料库来源卡片；旧消息没有这个字段。 */
+  sources?: DocumentSource[]
+}
 export type LocalChat = { id: string; conversationId: string | null; title: string; messages: ChatMessage[] }
 
 // 本地对话列表按用户分开保存，同一浏览器切换账号时看不到上一个账号的对话。
@@ -119,7 +126,7 @@ export async function sendChat(text: string, retry?: ChatMessage) {
       }
     })
     chat.conversationId = response.conversation_id
-    chat.messages.push({ role: 'assistant', text: response.answer, requestId })
+    chat.messages.push({ role: 'assistant', text: response.answer, requestId, sources: response.sources ?? [] })
     // 已保存的回复取代预览，避免刷新任务列表期间同一段文字显示两遍。
     state.chatPreview = { text: '', tool: null }
     saveChats()

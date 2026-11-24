@@ -1,4 +1,4 @@
-"""Agent 可调用的任务工具；API 路由不会自动成为 Agent 工具。"""
+"""Agent 可调用的工具（任务与资料库）；API 路由不会自动成为 Agent 工具。"""
 
 from contextlib import nullcontext
 from datetime import datetime
@@ -9,6 +9,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from sqlalchemy.orm import Session
 
+from backend.app.agent import document_tools
 from backend.app.config.settings import USER_TIMEZONE
 from backend.app.schemas.action import PendingAction
 from backend.app.schemas.task import TaskCreate, TaskUpdate
@@ -211,6 +212,8 @@ class ToolRegistry:
                 "handler": propose_delete,
                 "terminal_reply": format_proposal,
             },
+            # 资料库工具全部只读（spec 3.2）。
+            **document_tools.TOOLS,
         }
 
     def get_llm_tools(self):

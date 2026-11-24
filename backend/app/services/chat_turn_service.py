@@ -1,12 +1,14 @@
 """Persist each chat turn before side effects and resume it after interruption."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select, text
 
+from backend.app.agent.document_sources import build_sources, chars_read_in_turn, strip_markers
+from backend.app.agent.document_tools import CHARS_READ_KEY
 from backend.app.agent.tool_registry import ToolRegistry
 from backend.app.models.conversation import ConversationORM
 from backend.app.models.request import ChatTurnORM, DeletedChatRequestORM
@@ -27,6 +29,8 @@ class TurnState:
     owner_token: str | None
     messages: list[dict]
     answer: str | None
+    # 来源卡片（spec 3.4）；本轮完成后才有值。
+    sources: list[dict] = field(default_factory=list)
 
 
 REQUEST_ID_TAKEN = "请求 ID 已被使用，请为新消息生成新的请求 ID"
@@ -63,7 +67,9 @@ def acquire_turn(
             ):
                 raise HTTPException(409, "请求 ID 已用于不同的对话内容")
             if turn.status == "completed":
-                return TurnState(request_id, turn.conversation_id, None, list(turn.messages), turn.answer)
+                return TurnState(
+                    request_id, turn.conversation_id, None, list(turn.messages), turn.answer, list(turn.sources or [])
+                )
             if turn.lease_until is not None and turn.lease_until > now:
                 raise HTTPException(409, "这一轮对话正在处理，请稍后用同一请求 ID 重试")
             turn.owner_token = owner_token
@@ -155,6 +161,8 @@ def execute_tool(
         session.info["audit_request_id"] = request_id
         session.info["audit_conversation_id"] = turn.conversation_id
         session.info["audit_tool_call_id"] = call_id
+        # 阅读量以已持久化的工具结果为准，崩溃恢复后不会重新计数（spec 3.3）。
+        session.info[CHARS_READ_KEY] = chars_read_in_turn(turn.messages)
         # 工具只在本轮所属用户的数据范围内执行；归属来自已保存的 turn，而不是模型参数。
         output = registry.execute_tool(name, arguments, session, user_id=turn.user_id)
         tool_message = conversation_service.normalize_message({
@@ -166,22 +174,31 @@ def execute_tool(
         return output
 
 
-def complete_turn(request_id: str, owner_token: str, answer: str, session_factory) -> None:
+def complete_turn(request_id: str, owner_token: str, answer: str, session_factory) -> list[dict]:
+    """结束本轮并返回来源卡片。
+
+    chat_turns.messages 保留带来源标记的最终回复，卡片由它算出；
+    写进会话历史的是去掉标记的 answer，下一轮模型看不到已失效的片段 ID。
+    """
     with session_factory() as session, session.begin():
         turn = require_owner(session, request_id, owner_token)
         if not turn.messages or turn.messages[-1].get("role") != "assistant":
             raise HTTPException(500, "本轮对话缺少最终回复")
-        if turn.messages[-1].get("content") != answer:
+        if strip_markers(turn.messages[-1].get("content") or "") != answer:
             raise HTTPException(500, "本轮回复与保存内容不一致")
         session.info["chat_turn_completion"] = True
+        history = [*turn.messages[:-1], {**turn.messages[-1], "content": answer}]
         conversation_service.append_messages(
-            session, turn.conversation_id, turn.messages, turn.base_message_count
+            session, turn.conversation_id, history, turn.base_message_count
         )
+        sources = [source.model_dump() for source in build_sources(turn.messages, request_id=request_id)]
         turn.status = "completed"
         turn.active_conversation_id = None
         turn.owner_token = None
         turn.lease_until = None
         turn.answer = answer
+        turn.sources = sources
+        return sources
 
 
 def release_turn(request_id: str, owner_token: str, session_factory) -> None:

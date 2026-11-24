@@ -1,6 +1,6 @@
 # 留痕部署
 
-此目录的 Compose 配置面向 `liuhen.yyyyx.top`：Caddy 提供 HTTPS、公开的备案入口页、`/app/` 前端页面，并把 API 路径转发给 FastAPI；FastAPI 和 PostgreSQL 仅在 Compose 内部网络开放。访问控制由应用自己的账号登录负责（注册需管理员审核），网关不再做 HTTP Basic 登录。业务数据保存在 `postgres_data` 卷，Caddy 证书保存在 `caddy_data` 卷。
+此目录的 Compose 配置面向 `liuhen.yyyyx.top`：Caddy 提供 HTTPS、公开的备案入口页、`/app/` 前端页面，并把 API 路径转发给 FastAPI（路径前缀逐个列在 `Caddyfile` 的 `@api` 里，新增接口前缀时要同步添加，如资料库的 `/documents`）；FastAPI 和 PostgreSQL 仅在 Compose 内部网络开放。访问控制由应用自己的账号登录负责（注册需管理员审核），网关不再做 HTTP Basic 登录。业务数据保存在 `postgres_data` 卷，Caddy 证书保存在 `caddy_data` 卷。
 
 ## 首次部署
 

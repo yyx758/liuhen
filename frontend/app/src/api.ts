@@ -31,7 +31,9 @@ export type Action = {
 export type AuditEvent = {
   id: number
   event_type: string
-  task_id: number
+  /** 文档事件没有任务，task_id 为 null，document_id 有值。 */
+  task_id: number | null
+  document_id: number | null
   action_id: number | null
   request_id: string | null
   conversation_id: string | null
@@ -69,8 +71,10 @@ export type EventQuery = {
   actionId?: number
   requestId?: string
   since?: number
-  category?: 'all' | 'failed' | 'cancelled'
+  category?: AuditCategory
 }
+
+export type AuditCategory = 'all' | 'failed' | 'cancelled' | 'documents'
 
 export type CurrentUser = {
   id: number
@@ -210,7 +214,60 @@ async function request<T>(path: string, { handleAuthError = true, ...init }: Req
   return response.json() as Promise<T>
 }
 
-export type ChatReply = { answer: string; conversation_id: string; request_id: string }
+/** 服务端根据本轮实际读过的片段生成的来源卡片（不是模型写的链接）。 */
+export type DocumentSource = { document_id: number; title: string; heading_path: string[]; quote: string }
+
+export type ChatReply = { answer: string; conversation_id: string; request_id: string; sources: DocumentSource[] }
+
+export type DocumentSummary = {
+  id: number
+  title: string
+  category: string | null
+  excerpt: string
+  content_chars: number
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export type OutlineItem = { section_seq: number; heading_path: string[]; chars: number }
+
+/** 正文里的互链；document_ids 按最近更新排序，未解析时为空。 */
+export type DocumentLink = { text: string; title: string; heading: string | null; document_ids: number[] }
+
+export type DocumentRead = DocumentSummary & { content: string; outline: OutlineItem[]; links: DocumentLink[] }
+
+export type DocumentInput = { title: string; category: string | null; content: string }
+
+export type DocumentListPage = { items: DocumentSummary[]; next_before_id: number | null; total: number }
+
+export type DocumentCategory = { name: string; count: number }
+
+export type SearchHit = {
+  document_id: number
+  title: string
+  category: string | null
+  chunk_id: number
+  heading_path: string[]
+  snippet: string
+  matched_queries: string[]
+  is_heading_only: boolean
+  updated_at: string
+}
+
+export type DocumentSearchGroup = { document: DocumentSummary; hits: SearchHit[] }
+
+export type ImageRead = {
+  id: string
+  url: string
+  content_type: string
+  byte_size: number
+  original_name: string | null
+  reused: boolean
+}
+
+/** 本站图片地址加上 API 基础地址（开发环境经 Vite 代理时 BASE 为空，原样返回）。 */
+export function imageUrl(path: string): string { return `${BASE}${path}` }
 
 /** /chat/stream 的过程事件：delta 是回复预览，tool 表示开始调用某个工具（此前的预览作废）。 */
 export type ChatProgress = { event: 'delta'; text: string } | { event: 'tool'; name: string }
@@ -355,7 +412,7 @@ export const api = {
     if (category && category !== 'all') params.set('category', category)
     return request<AuditEvent[]>(`/audit/events?${params}`)
   },
-  eventPage: (page: number, pageSize: number, since?: number, category: 'all' | 'failed' | 'cancelled' = 'all', anchorId?: number) => {
+  eventPage: (page: number, pageSize: number, since?: number, category: AuditCategory = 'all', anchorId?: number) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), category })
     if (since !== undefined) params.set('since', String(since))
     if (anchorId !== undefined) params.set('anchor_id', String(anchorId))
@@ -363,6 +420,32 @@ export const api = {
   },
   auditSummary: (since?: number) => request<AuditSummary>(`/audit/summary${since === undefined ? '' : `?since=${since}`}`),
   chatStream,
+  documents: (category?: string | null, beforeId?: number | null, limit = 30) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (category) params.set('category', category)
+    if (beforeId) params.set('before_id', String(beforeId))
+    return request<DocumentListPage>(`/documents?${params}`)
+  },
+  documentCategories: () => request<DocumentCategory[]>('/documents/categories'),
+  searchDocuments: (q: string, category?: string | null) => {
+    const params = new URLSearchParams({ q })
+    if (category) params.set('category', category)
+    return request<DocumentSearchGroup[]>(`/documents/search?${params}`)
+  },
+  document: (id: number) => request<DocumentRead>(`/documents/${id}`),
+  createDocument: (input: DocumentInput, key: string) => request<DocumentSummary>('/documents', {
+    method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify(input),
+  }),
+  updateDocument: (id: number, version: number, input: Partial<DocumentInput>) => request<DocumentRead>(`/documents/${id}`, {
+    method: 'PATCH', headers: { 'If-Match': String(version) }, body: JSON.stringify(input),
+  }),
+  deleteDocument: (id: number, version: number) => request<void>(`/documents/${id}`, {
+    method: 'DELETE', headers: { 'If-Match': String(version) },
+  }),
+  /** 请求体就是文件本身；后端按文件头判断格式，Content-Type 只需不是 JSON。 */
+  uploadImage: (file: File) => request<ImageRead>(`/documents/images?${new URLSearchParams({ name: file.name.slice(0, 255) })}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
+  }),
   deleteConversation: (conversationId: string) => request<void>(`/chat/conversations/${encodeURIComponent(conversationId)}`, {
     method: 'DELETE',
   }),

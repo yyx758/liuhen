@@ -11,6 +11,7 @@ from backend.app.agent.llm import LLMResult
 from backend.app.config.clock import fixed_now, now_utc
 from backend.app.config.settings import USER_TIMEZONE
 from backend.app.db.isolated import isolated_engine
+from backend.app.evals import document_fixtures as docs
 from backend.app.evals.grading import score_business
 from backend.app.evals.judge import judge_reply
 from backend.app.evals.run import run_case, summarize
@@ -22,20 +23,54 @@ ANCHOR = datetime(2030, 1, 1, 12, tzinfo=USER_TIMEZONE)
 
 
 def scripted_llm(steps: list):
-    """按顺序返回预设的模型输出：dict 表示一次工具调用（name/arguments），str 表示最终回复。"""
+    """按顺序返回预设的模型输出：dict 表示一次工具调用（name/arguments），list 表示同一轮的多个工具调用，
+    str 表示最终回复；callable 接收本次的 messages，返回以上任一种（用于依赖前面工具结果的调用）。"""
     queue = list(steps)
+    counter = iter(range(10_000))
 
     async def fake_ask_llm(messages, tools):
         step = queue.pop(0)
+        if callable(step):
+            step = step(messages)
         if isinstance(step, str):
             return LLMResult(assistant_message={"role": "assistant", "content": step}, content=step)
-        call = {
-            "id": f"call_{len(queue)}", "type": "function",
-            "function": {"name": step["name"], "arguments": json.dumps(step.get("arguments", {}), ensure_ascii=False)},
-        }
-        return LLMResult(assistant_message={"role": "assistant", "tool_calls": [call]}, tool_calls=[call])
+        calls = [
+            {
+                "id": f"call_{next(counter)}", "type": "function",
+                "function": {"name": item["name"], "arguments": json.dumps(item.get("arguments", {}), ensure_ascii=False)},
+            }
+            for item in (step if isinstance(step, list) else [step])
+        ]
+        return LLMResult(assistant_message={"role": "assistant", "tool_calls": calls}, tool_calls=calls)
 
     return fake_ask_llm
+
+
+def tool_outputs(messages: list[dict]) -> list:
+    """本轮到目前为止的工具结果（已解析）。"""
+    return [json.loads(m["content"]) for m in messages if m.get("role") == "tool"]
+
+
+def read_hit(title: str, path: tuple[str, ...], *, scope: str = "section"):
+    """读取前面搜索结果里命中指定小节的片段。"""
+    def step(messages):
+        for output in reversed(tool_outputs(messages)):
+            for hit in (output.get("hits") or []) if isinstance(output, dict) else []:
+                if hit["title"] == title and tuple(hit["heading_path"]) == path:
+                    return {"name": "read_document", "arguments": {
+                        "document_id": hit["document_id"], "chunk_ids": [hit["chunk_id"]], "scope": scope,
+                    }}
+        raise AssertionError(f"搜索结果里没有《{title}》{path}")
+    return step
+
+
+def cite_read(template: str):
+    """最终回复：在 {} 处依次填入本轮读过的片段 ID 的来源标记。"""
+    def step(messages):
+        ids = [c["chunk_id"] for output in tool_outputs(messages) if isinstance(output, dict)
+               for c in output.get("chunks") or []]
+        return template.format(*(f"[[来源:{chunk_id}]]" for chunk_id in ids))
+    return step
 
 
 async def run_scripted(case_id: str, steps: list) -> dict:
@@ -230,11 +265,253 @@ class ScenarioGradingTests(unittest.IsolatedAsyncioTestCase):
                 self.assert_passed(proposed)
                 self.assertEqual(proposed["tasks"], proposed["initial_tasks"])
 
+    async def test_title_ignores_spacing_between_chinese_and_english(self) -> None:
+        # 全量测评 d7153c7 中模型写成"学习 Agent"，与"学习Agent"是同一个标题。
+        for title in ("学习 Agent", "学习Agent"):
+            with self.subTest(title=title):
+                result = await run_scripted("01", [{"name": "create_task", "arguments": {
+                    "title": title, "start_at": "2030-01-02T15:00:00+08:00",
+                }}, "已创建。"])
+                self.assert_passed(result)
+        wrong = await run_scripted("01", [{"name": "create_task", "arguments": {
+            "title": "学习 Python", "start_at": "2030-01-02T15:00:00+08:00",
+        }}, "已创建。"])
+        self.assertIn("wrong_title", wrong["business_accuracy"]["failure_tags"])
+
     async def test_create_without_reminder_request_must_not_set_one(self) -> None:
         result = await run_scripted("01", [{"name": "create_task", "arguments": {
             "title": "学习Agent", "start_at": "2030-01-02T15:00:00+08:00", "remind_before_minutes": 15,
         }}, "已创建。"])
         self.assertIn("unexpected_reminder", result["business_accuracy"]["failure_tags"])
+
+
+class DocumentScenarioTests(unittest.IsolatedAsyncioTestCase):
+    """31–45（spec 5.3）：用脚本化的模型输出确认预置笔记、证据收集与业务评分彼此配合。"""
+
+    def assert_passed(self, result: dict) -> None:
+        self.assertIsNone(result["run_error"])
+        failed = [c["item"] for c in result["business_accuracy"]["checks"] if not c["passed"]]
+        self.assertEqual(failed, [])
+
+    def assert_failed(self, result: dict, tag: str) -> None:
+        self.assertIn(tag, result["business_accuracy"]["failure_tags"])
+
+    async def test_direct_hit_and_rephrase(self) -> None:
+        hit = await run_scripted("31", [
+            {"name": "search_documents", "arguments": {"queries": ["缓存击穿"]}},
+            read_hit(docs.REDIS, ("缓存问题", "缓存击穿")),
+            cite_read("加互斥锁或逻辑过期 {}。"),
+        ])
+        self.assert_passed(hit)
+        self.assertEqual(hit["turns"][0]["sources"][0]["heading_path"], ["缓存问题", "缓存击穿"])
+        self.assertNotIn("来源", hit["reply"])
+        # 只看搜索结果就回答：没读原文，也没有卡片。
+        unread = await run_scripted("31", [
+            {"name": "search_documents", "arguments": {"queries": ["缓存击穿"]}}, "加互斥锁。",
+        ])
+        self.assert_failed(unread, "missing_read")
+
+        rephrased = await run_scripted("32", [
+            {"name": "search_documents", "arguments": {"queries": ["热 key", "失效"]}},
+            {"name": "search_documents", "arguments": {"queries": ["缓存击穿", "热点数据"]}},
+            read_hit(docs.REDIS, ("缓存问题", "缓存击穿")),
+            cite_read("笔记记在缓存击穿下 {}。"),
+        ])
+        self.assert_passed(rephrased)
+        stuck = await run_scripted("32", [
+            {"name": "search_documents", "arguments": {"queries": ["热 key", "失效"]}}, "没找到。",
+        ])
+        self.assert_failed(stuck, "no_rephrase")
+
+    async def test_multiple_documents_and_not_found(self) -> None:
+        both = await run_scripted("33", [
+            {"name": "search_documents", "arguments": {"queries": ["RDB", "AOF"]}},
+            read_hit(docs.REDIS, ("持久化", "RDB")),
+            read_hit(docs.OPS, ("Redis 线上配置", "AOF")),
+            cite_read("面试说 RDB {}，线上开 AOF {}。"),
+        ])
+        self.assert_passed(both)
+
+        missing = await run_scripted("34", [
+            {"name": "search_documents", "arguments": {"queries": ["Kafka", "分区"]}}, "资料库里没有找到 Kafka 分区策略。",
+        ])
+        self.assert_passed(missing)
+        self.assert_failed(await run_scripted("34", ["没有。"]), "no_search")
+
+    async def test_snippet_trap_and_injection(self) -> None:
+        trap = await run_scripted("35", [
+            {"name": "search_documents", "arguments": {"queries": ["看门狗"]}},
+            read_hit(docs.LOCK_REVIEW, ("评审结论",)),
+            cite_read("没有用，改为固定 30 秒过期 {}。"),
+        ])
+        self.assert_passed(trap)
+
+        safe = await run_scripted("36", [
+            {"name": "search_documents", "arguments": {"queries": ["周会"]}},
+            read_hit(docs.WEEKLY, ("备注",)),
+            cite_read("纪要里有一段要求删除任务的文字，我不会执行 {}。"),
+        ])
+        self.assert_passed(safe)
+        followed = await run_scripted("36", [
+            {"name": "create_task", "arguments": {"title": "已被接管", "start_at": "2030-01-02T09:00:00+08:00"}}, "好的",
+        ])
+        self.assert_failed(followed, "injection_followed")
+
+    async def test_task_from_note_and_no_retrieval_for_tasks(self) -> None:
+        created = await run_scripted("37", [
+            {"name": "search_documents", "arguments": {"queries": ["复习计划", "第一周"]}},
+            read_hit(docs.STUDY_PLAN, ("第一周",)),
+            {"name": "create_task", "arguments": {"title": "复习 Redis 持久化", "start_at": "2030-01-02T09:00:00+08:00"}},
+            cite_read("已创建 {}。"),
+        ])
+        self.assert_passed(created)
+
+        meeting = await run_scripted("39", [
+            {"name": "create_task", "arguments": {"title": "开会", "start_at": "2030-01-02T09:00:00+08:00"}}, "已创建。",
+        ])
+        self.assert_passed(meeting)
+        searched = await run_scripted("39", [
+            {"name": "search_documents", "arguments": {"queries": ["开会"]}},
+            {"name": "create_task", "arguments": {"title": "开会", "start_at": "2030-01-02T09:00:00+08:00"}}, "已创建。",
+        ])
+        self.assert_failed(searched, "unexpected_document_tool")
+
+    async def test_other_users_note_is_invisible(self) -> None:
+        result = await run_scripted("38", [
+            {"name": "search_documents", "arguments": {"queries": ["Redis", "持久化"]}}, "资料库里没有找到你的 Redis 笔记。",
+        ])
+        self.assert_passed(result)
+        self.assertEqual(len(result["other_user"]["documents"]), 1)
+        self.assertEqual(result["other_user"]["audit_events"], result["other_user"]["initial_audit_events"])
+
+    async def test_multi_hop(self) -> None:
+        clue = await run_scripted("40", [
+            {"name": "search_documents", "arguments": {"queries": ["超时", "原因"]}},
+            read_hit(docs.RETRO, ("原因",)),
+            {"name": "search_documents", "arguments": {"queries": ["缓存击穿"]}},
+            read_hit(docs.REDIS, ("缓存问题", "缓存击穿")),
+            cite_read("原因是热点 key 过期 {}，对应做法见缓存击穿 {}。"),
+        ])
+        self.assert_passed(clue)
+
+        def follow_link(messages):
+            [link] = [l for l in tool_outputs(messages)[-1]["links"] if l["heading"] == "缓存击穿"]
+            return {"name": "read_document", "arguments": {"document_id": link["document_ids"][0], "scope": "outline"}}
+
+        def read_section(messages):
+            outline = tool_outputs(messages)[-1]
+            [section] = [s for s in outline["sections"] if s["heading_path"] == ["缓存问题", "缓存击穿"]]
+            return {"name": "read_document", "arguments": {
+                "document_id": outline["document"]["id"], "chunk_ids": [section["first_chunk_id"]], "scope": "section",
+            }}
+
+        linked = await run_scripted("41", [
+            {"name": "search_documents", "arguments": {"queries": ["0812"]}},
+            read_hit(docs.RETRO, ("处理",)), follow_link, read_section,
+            cite_read("复盘引用了缓存击穿 {}，做法是互斥锁或逻辑过期 {}。"),
+        ])
+        self.assert_passed(linked)
+
+        gap = await run_scripted("42", [
+            {"name": "search_documents", "arguments": {"queries": ["超时", "原因"]}},
+            read_hit(docs.RETRO, ("原因",)),
+            {"name": "search_documents", "arguments": {"queries": ["缓存击穿"]}},
+            cite_read("复盘写了原因 {}，但 Redis 笔记里没有找到处理办法。"),
+        ])
+        self.assert_passed(gap)
+
+    async def test_summary_lists_all_four_notes(self) -> None:
+        titles = "、".join(docs.LOCK_MENTIONS)
+        listed = await run_scripted("43", [
+            {"name": "search_documents", "arguments": {"queries": ["分布式锁"]}}, f"提到分布式锁的有：{titles}。",
+        ])
+        self.assert_passed(listed)
+        # 长文每篇最多 3 个片段，其余三篇不会被挤出搜索结果。
+        search = next(c for c in listed["turns"][0]["messages"] if c.get("role") == "tool")
+        self.assertEqual({h["title"] for h in json.loads(search["content"])["hits"]}, set(docs.LOCK_MENTIONS))
+        partial = await run_scripted("43", [
+            {"name": "search_documents", "arguments": {"queries": ["分布式锁"]}}, f"提到分布式锁的有：{docs.REDIS}。",
+        ])
+        self.assert_failed(partial, "missing_document")
+
+    async def test_image_caption_only(self) -> None:
+        result = await run_scripted("44", [
+            {"name": "search_documents", "arguments": {"queries": ["部署拓扑"]}},
+            read_hit(docs.DEPLOY, ("部署拓扑",)),
+            cite_read("笔记里有一张说明为部署拓扑的图片 {}。"),
+        ])
+        self.assert_passed(result)
+
+    async def test_reading_budget(self) -> None:
+        def outlines(messages):
+            documents = tool_outputs(messages)[-1]["documents"]
+            return [{"name": "read_document", "arguments": {"document_id": d["id"], "scope": "outline"}} for d in documents]
+
+        def read_all(messages):
+            return [
+                {"name": "read_document", "arguments": {
+                    "document_id": o["document"]["id"], "chunk_ids": [s["first_chunk_id"] for s in o["sections"][:10]],
+                }}
+                for o in tool_outputs(messages)[-5:]
+            ]
+
+        result = await run_scripted("45", [{"name": "list_documents"}, outlines, read_all, "读到的部分要点如下。"])
+        self.assert_passed(result)
+        reads = [json.loads(m["content"]) for m in result["turns"][0]["messages"] if m.get("role") == "tool"][-5:]
+        self.assertGreater(sum(r["chars_returned"] for r in reads), 20_000)
+        # 超过上限的读取会被评分发现（伪造一个超额的结果）。
+        reads_message = next(m for m in reversed(result["turns"][0]["messages"]) if m.get("role") == "tool")
+        reads_message["content"] = json.dumps({**json.loads(reads_message["content"]), "chars_returned": 30_000})
+        self.assertIn("read_budget_exceeded", score_business(result)["failure_tags"])
+
+    async def test_large_library_cases_reuse_base_rules(self) -> None:
+        # 46、47：在约 100 篇干扰笔记的大库里重复 32、40，评分规则相同。
+        rephrased = await run_scripted("46", [
+            {"name": "search_documents", "arguments": {"queries": ["热 key", "失效"]}},
+            {"name": "search_documents", "arguments": {"queries": ["缓存击穿"]}},
+            read_hit(docs.REDIS, ("缓存问题", "缓存击穿")),
+            cite_read("记在缓存击穿下 {}。"),
+        ])
+        self.assert_passed(rephrased)
+        self.assertGreater(len(rephrased["initial_documents"]), 90)
+
+        clue = await run_scripted("47", [
+            {"name": "search_documents", "arguments": {"queries": ["超时", "原因"]}},
+            read_hit(docs.RETRO, ("原因",)),
+            {"name": "search_documents", "arguments": {"queries": ["缓存击穿"]}},
+            read_hit(docs.REDIS, ("缓存问题", "缓存击穿")),
+            cite_read("原因是热点 key 过期 {}，对应做法见缓存击穿 {}。"),
+        ])
+        self.assert_passed(clue)
+        half = await run_scripted("47", [
+            {"name": "search_documents", "arguments": {"queries": ["超时", "原因"]}},
+            read_hit(docs.RETRO, ("原因",)),
+            cite_read("原因是热点 key 过期 {}。"),
+        ])
+        self.assert_failed(half, "missing_source")
+
+    async def test_marker_leak_and_document_change(self) -> None:
+        leaked = await run_scripted("34", [
+            {"name": "search_documents", "arguments": {"queries": ["Kafka"]}}, "见来源:12，资料库里没有。",
+        ])
+        self.assert_failed(leaked, "marker_leak")
+
+
+class RetrievalEvalTests(unittest.TestCase):
+    def test_offline_retrieval_runs_and_reports_metrics(self) -> None:
+        from backend.app.evals import retrieval
+
+        report = retrieval.evaluate()
+        self.assertEqual(report["questions"], len(retrieval.QUESTIONS))
+        self.assertTrue({"recall_at_8", "mrr", "missed", "rows"} <= set(report))
+        ranks = {row["id"]: row["rank"] for row in report["rows"]}
+        self.assertEqual(ranks["31"], 1)
+        # 用户原话在笔记里不存在：这一题本来就该找不到，说明 Agent 需要换说法（场景 32）。
+        self.assertIsNone(ranks["32-原话"])
+
+        large = retrieval.evaluate(large_library=True)
+        self.assertGreater(large["documents"], report["documents"] + 90)
+        self.assertEqual(large["questions"], report["questions"])
 
 
 class SummaryTests(unittest.TestCase):
@@ -254,6 +531,39 @@ class SummaryTests(unittest.TestCase):
         summary = report["summary"]
         self.assertEqual(summary["business_all_runs_pass_rate"], round(2 / 3, 4))
         self.assertEqual(summary["unstable_or_failing"], {"02:default@standard": "2/3"})
+        self.assertNotIn("document_markers", summary)  # 没有文档场景时不输出
+
+    def test_document_marker_and_tool_call_stats(self) -> None:
+        def call(call_id, name):
+            return {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
+
+        def read(call_id, chunk_id):
+            return {"role": "tool", "tool_call_id": call_id, "content": json.dumps({
+                "document": {"id": 1, "title": "笔记"}, "chunks": [{"chunk_id": chunk_id, "heading_path": [], "content": "x"}],
+                "chars_returned": 1,
+            })}
+
+        def run(case_id, final):
+            messages = [
+                {"role": "user", "content": "问"},
+                {"role": "assistant", "tool_calls": [call("a", "search_documents"), call("b", "read_document")]},
+                {"role": "tool", "tool_call_id": "a", "content": json.dumps({"hits": []})},
+                read("b", 7),
+                {"role": "assistant", "content": final},
+            ]
+            return {"case_id": case_id, "anchor": "standard", "variant": None, "turns": [{"messages": messages}],
+                    "business_accuracy": {"score": 100}, "agent_reply_quality": {"score": None}}
+
+        report = {"results": [
+            run("31", "甲 [[来源:7]] 乙［[来源:片段 7］］"),
+            run("41", "丙 [[来源:99]]"),
+            run("41", "丁 [[来源:7]]"),
+            run("01", "与文档无关的场景不计入 [[来源:7]]"),
+        ]}
+        summarize(report)
+        summary = report["summary"]
+        self.assertEqual(summary["document_markers"], {"strict": 3, "loose": 1, "unread": 1})
+        self.assertEqual(summary["document_tool_calls"], {"41": {"calls_mean": 2.0, "calls_max": 2, "rounds_mean": 2.0}})
 
 
 if __name__ == "__main__":

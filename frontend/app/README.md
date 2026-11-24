@@ -1,6 +1,6 @@
 # 留痕前端
 
-以 `../reference/index.html` 为主要视觉原型，并参考新增的“留痕”页面设计，使用 Vue 3、TypeScript、Vite 和 Vue Router 实现首页、对话、日历、待办、资料库和留痕页面。沿用原型 CSS，并按原型结构还原页面和待办弹窗。资料库中的三篇笔记是原型示例，后端尚无文档 API；新建和打开笔记会提示暂不可用。当前共享状态较少，使用 `src/state.ts` 的 Vue 响应式对象，没有引入 Pinia。
+以 `../reference/index.html` 为主要视觉原型，并参考新增的“留痕”页面设计，使用 Vue 3、TypeScript、Vite 和 Vue Router 实现首页、对话、日历、待办、资料库和留痕页面。沿用原型 CSS，并按原型结构还原页面和待办弹窗。资料库接入 `/documents` 接口（见下文“资料库”）。当前共享状态较少，使用 `src/state.ts` 的 Vue 响应式对象，没有引入 Pinia。
 
 ## 本地运行
 
@@ -18,7 +18,7 @@ npm ci
 npm run dev
 ```
 
-访问 `http://127.0.0.1:5173/`。开发服务固定监听 IPv4 地址 `127.0.0.1` 和端口 `5173`；修改 Vite 配置后需停止旧进程并重新运行 `npm run dev`。Vite 在开发环境将 `/auth`、`/admin`、`/tasks`、`/chat`、`/actions`、`/audit` 代理到 `http://127.0.0.1:8000`。部署时可设置 `VITE_API_BASE_URL` 指向同源反向代理或允许跨域的 API 地址。
+访问 `http://127.0.0.1:5173/`。开发服务固定监听 IPv4 地址 `127.0.0.1` 和端口 `5173`；修改 Vite 配置后需停止旧进程并重新运行 `npm run dev`。Vite 在开发环境将 `/auth`、`/admin`、`/tasks`、`/chat`、`/actions`、`/audit`、`/notifications`、`/documents` 代理到 `http://127.0.0.1:8000`。部署时可设置 `VITE_API_BASE_URL` 指向同源反向代理的 API 地址；笔记里的图片靠 Cookie 鉴权，API 必须与页面同源。
 
 在 Windows 上重新执行 `npm ci` 前，先停止正在运行的本项目前端开发服务器；Vite 加载的原生模块可能使依赖清理遇到 `EPERM`。日常启动无需重复执行 `npm ci`。
 
@@ -37,5 +37,14 @@ npm run dev
 - 留痕页通过 `/audit/events/page?page=页码&page_size=20` 按页查询，可使用上一页、下一页、页码按钮和指定页跳转；响应提供当前页、总条数、总页数和记录 ID 上界 `anchor_id`。后续页沿用该上界，翻页期间新增记录不会挤动当前结果。失败、已取消和本周筛选在后端执行，概览数字来自 `/audit/summary`。“需要确认”从有效提案列表读取并在前端分页。展开“轨迹”时仍按需使用游标接口 `/audit/events` 读取相关审计记录；后端没有保存完整工具调用步骤，因此不显示原型中的示例步骤或平均步数。
 - 流式回复：`EventSource` 只支持 GET，因此用 `fetch` 读取响应体并按空行切分 SSE 事件。`delta` 追加到预览，`tool` 清空预览并显示工具状态（如“正在创建任务…”），`done` 用已保存的回复替换预览；收到 `error` 或连接中断时标记发送失败，可用原请求重试。预览与正式回复使用同一套 Markdown 渲染与清理。
 - 原型中的任务分类、备注和子任务还没有对应的后端字段；相关位置保留原型布局，但不会把未保存的数据显示为操作成功。任务列表与日历显示真实后端数据，因此数量和原型示例不同。
+
+## 资料库
+
+- 列表 `/library`：按最后更新倒序，每页 30 篇“加载更多”；分类下拉；搜索框是精确关键词搜索（防抖 300 ms，空格分隔，最多 5 个词），结果按文档分组并高亮关键词，不调用模型。
+- 编辑器 `components/DocumentEditor.vue`：新建、导入、编辑共用，全文 Markdown 编辑与预览。粘贴、拖入或“插入图片”时先插入占位，上传成功后替换为 `![说明](/documents/images/…)`，失败时去掉占位。新建用 `Idempotency-Key`，编辑带 `If-Match`，409 时保留编辑内容并提示刷新；有未保存修改时关闭或离开页面先确认。
+- 导入 `documentImport.ts`：选一个 UTF-8 的 `.md` 文件，可同时选它引用的图片；按文件名匹配 `![…](相对路径)` 和 `![[图.png]]`（跳过代码块），上传后改写为本站地址，没匹配上的在编辑器顶部列出。
+- 详情页 `/library/:id`（`views/DocumentPage.vue`）：渲染见 `documentMarkdown.ts`——小节标题按后端切片的同一规则识别（目录与定位依赖它）；只加载本站图片，外链图片显示为链接；`[[互链]]` 与 `.md` 相对链接按后端解析结果站内跳转。查询参数 `h`（小节路径）、`q`（引文）由 `documentLocate.ts` 定位并高亮，定位不到时依次退到小节、文档开头并提示。
+- 对话页：回复下方显示服务端生成的来源卡片（`components/SourceCards.vue`），点击进入详情页定位；回复预览中隐藏来源标记。
+- 手动试用清单见 `docs/spec/spec-documents.md` 4.14，示例笔记在 `docs/spec/samples/`。
 
 运行 `npm run build` 进行 TypeScript 检查和生产构建。

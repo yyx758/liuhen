@@ -16,7 +16,7 @@
 | 可靠性 | Chat 请求与直接创建的幂等处理、同一会话并发保护、确认与取消的事务竞争 |
 | 留痕 | 对话与工具过程持久化；业务操作写入只追加的审计日志 |
 | 流式输出 | `POST /chat/stream` 以 SSE 推送工具状态与回复预览，最终回复与持久化结果一致；客户端断开不中断本轮 |
-| 测评 | 30 条场景（含跨用户隔离、任务提醒）、隔离数据库、固定测评时间点、业务规则评分、LLM 回复裁判和人工抽样校准 |
+| 测评 | 47 条场景（含跨用户隔离、任务提醒、资料库检索与多跳、约 100 篇笔记的大库）、隔离数据库、固定测评时间点、业务规则评分、LLM 回复裁判和人工抽样校准；另有不调用模型的离线检索评测 |
 
 ## 项目架构
 
@@ -197,7 +197,7 @@ python -m backend.app.evals.run --all --trials 3       # 确认没有影响其�
 python -m backend.app.evals.run --all --trials 3 --anchors all   # 改了时间相关逻辑时：三个时间点，记录数乘 3
 ```
 
-全量包含 30 条场景（27–30 为任务提醒）；第 14 条每次覆盖三种确认／取消并发变体，因此每轮 32 份记录，运行 3 轮共 96 份（`--anchors all` 时 288 份）。报告默认保存为 `backend/evals/results/<场景号或 all>.json`，同名文件已存在时自动另存为 `-2`、`-3` 等，不会覆盖；也可用 `--output` 指定路径。终端最后打印汇总，重点看 `unstable_or_failing`。查看某份报告的汇总：
+全量包含 47 条场景（27–30 为任务提醒，31–47 为资料库检索，其中 46、47 在约 100 篇干扰笔记的大库里重复 32、40）；第 14 条每次覆盖三种确认／取消并发变体，因此每轮 49 份记录，运行 3 轮共 147 份（`--anchors all` 时 441 份）。资料库场景的预置笔记在 `backend/app/evals/document_fixtures.py`；汇总里另有 `document_markers`（来源标记的规范写法、宽松识别、引用未读片段的次数）和 `document_tool_calls`（40–45 的工具调用次数与模型调用轮数）。报告默认保存为 `backend/evals/results/<场景号或 all>.json`，同名文件已存在时自动另存为 `-2`、`-3` 等，不会覆盖；也可用 `--output` 指定路径。终端最后打印汇总，重点看 `unstable_or_failing`。查看某份报告的汇总：
 
 ```powershell
 $report = Get-Content backend/evals/results/all.json -Raw | ConvertFrom-Json
@@ -238,4 +238,14 @@ python -m backend.app.evals.calibration compare backend/evals/reviews/all-review
 python -m unittest discover -s backend/tests -v
 ```
 
-生产对话自动转为测评候选案例的流程尚未实现；目前的 30 条测评场景由人工维护。
+生产对话自动转为测评候选案例的流程尚未实现；目前的 47 条测评场景由人工维护。
+
+### 离线检索评测
+
+不调用模型，只看关键词搜索能不能把证据找出来，用于调整切片或排序时对比（docs/spec/spec-documents.md 5.6）：
+
+```powershell
+python -m backend.app.evals.retrieval
+```
+
+把 `document_fixtures.py` 的全部笔记导入临时库，对每道题的关键词调用搜索，输出每题命中名次、Recall@8 和 MRR；同一组题目在基础语料和另加约 100 篇干扰笔记的大库上各跑一遍。证据按“文档标题 + 引文”标注，换切片策略后题目仍可复用。结果记入 `docs/项目进度.md` 的“离线检索评测”表。

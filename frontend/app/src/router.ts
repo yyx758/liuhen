@@ -5,6 +5,7 @@ import ChatPage from './views/ChatPage.vue'
 import CalendarPage from './views/CalendarPage.vue'
 import TasksPage from './views/TasksPage.vue'
 import LibraryPage from './views/LibraryPage.vue'
+import DocumentPage from './views/DocumentPage.vue'
 import AuditPage from './views/AuditPage.vue'
 import LoginPage from './views/LoginPage.vue'
 import PasswordPage from './views/PasswordPage.vue'
@@ -40,6 +41,7 @@ export const router = createRouter({
     { path: '/calendar', component: CalendarPage },
     { path: '/tasks', component: TasksPage },
     { path: '/library', component: LibraryPage },
+    { path: '/library/:id(\\d+)', component: DocumentPage },
     { path: '/history', component: AuditPage },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

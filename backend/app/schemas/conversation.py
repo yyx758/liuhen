@@ -12,10 +12,20 @@ class ChatRequest(BaseModel):
     request_id: UUID
 
 
+class DocumentSource(BaseModel):
+    """服务端根据本轮 read_document 结果生成的来源卡片（spec 3.4），不是模型写的链接。"""
+
+    document_id: int
+    title: str = Field(description="读取时的标题快照")
+    heading_path: list[str]
+    quote: str = Field(description="片段里的一段纯文本，前端用它在正文里定位；为空时按小节定位")
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     answer: str
     request_id: UUID
+    sources: list[DocumentSource] = []
 
 
 class ConversationMessage(BaseModel):

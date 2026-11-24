@@ -27,6 +27,8 @@ class ChatTurnORM(Base):
     base_message_count: Mapped[int] = mapped_column(nullable=False)
     messages: Mapped[list] = mapped_column(JSON, nullable=False)
     answer: Mapped[str | None] = mapped_column(nullable=True)
+    # 本轮回复的来源定位卡片（PRD D19）；旧数据为空，读取时按空列表处理。
+    sources: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     # UTC Unix 时间戳（秒）；用于按用户统计每日对话轮数。
     created_at: Mapped[int] = mapped_column(nullable=False)
 
@@ -49,6 +51,17 @@ class DeletedChatRequestORM(Base):
     __table_args__ = (
         Index("ix_deleted_chat_requests_user_id_turn_created_at", "user_id", "turn_created_at"),
     )
+
+
+class DocumentCreateRequestORM(Base):
+    """POST /documents 的 Idempotency-Key；只存结果元数据，不重复存正文。"""
+    __tablename__ = "document_create_requests"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[int] = mapped_column(nullable=False)
 
 
 class TaskCreateRequestORM(Base):

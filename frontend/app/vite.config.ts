@@ -24,6 +24,7 @@ export default defineConfig({
       '/audit': backend,
       '/admin': backend,
       '/notifications': backend,
+      '/documents': backend,
     },
   },
 })

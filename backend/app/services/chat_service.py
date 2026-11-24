@@ -74,7 +74,7 @@ async def run_turn(
     evaluation_now: datetime | None = None,
     on_event: Callable[[str, dict], Awaitable[None]] | None = None,
 ) -> str:
-    """执行 begin_turn 取得的一轮对话并持久化，返回最终回复。"""
+    """执行 begin_turn 取得的一轮对话并持久化，返回最终回复；完成后 turn.answer、turn.sources 已写回。"""
     factory = session_factory or SessionLocal
     request_id = turn.request_id
     try:
@@ -102,10 +102,11 @@ async def run_turn(
             on_event=on_event,
             user_id=user_id,
         )
-        await asyncio.to_thread(
+        sources = await asyncio.to_thread(
             chat_turn_service.complete_turn,
             request_id, turn.owner_token, answer, factory,
         )
+        turn.answer, turn.sources = answer, sources
         return answer
     except Exception:
         await asyncio.to_thread(

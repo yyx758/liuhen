@@ -28,10 +28,14 @@ def format_sse(event: str, data: dict[str, Any]) -> str:
 
 @router.post("", response_model=ChatResponse)
 async def send_message(data: ChatRequest, user_id: CurrentUserId) -> ChatResponse:
-    conversation_id, answer = await chat_service.send_message(
+    turn = await chat_service.begin_turn(
         data.user_text, data.conversation_id, str(data.request_id), user_id=user_id
     )
-    return ChatResponse(conversation_id=conversation_id, answer=answer, request_id=data.request_id)
+    if turn.answer is None:
+        await chat_service.run_turn(turn, data.user_text, user_id=user_id)
+    return ChatResponse(
+        conversation_id=turn.conversation_id, answer=turn.answer, request_id=data.request_id, sources=turn.sources
+    )
 
 
 @router.post("/stream")
@@ -42,16 +46,17 @@ async def stream_message(data: ChatRequest, user_id: CurrentUserId) -> Streaming
         data.user_text, data.conversation_id, str(data.request_id), user_id=user_id
     )
 
-    def done_event(answer: str) -> tuple[str, dict[str, Any]]:
+    def done_event() -> tuple[str, dict[str, Any]]:
         return "done", {
             "conversation_id": turn.conversation_id,
-            "answer": answer,
+            "answer": turn.answer,
             "request_id": str(data.request_id),
+            "sources": turn.sources,
         }
 
     if turn.answer is not None:
         # 同一 request_id 已完成：直接回放结果，不再调用模型。
-        replay = done_event(turn.answer)
+        replay = done_event()
 
         async def replay_events() -> AsyncIterator[str]:
             yield format_sse(*replay)
@@ -65,10 +70,8 @@ async def stream_message(data: ChatRequest, user_id: CurrentUserId) -> Streaming
 
     async def run() -> None:
         try:
-            answer = await chat_service.run_turn(
-                turn, data.user_text, user_id=user_id, on_event=on_event
-            )
-            queue.put_nowait(done_event(answer))
+            await chat_service.run_turn(turn, data.user_text, user_id=user_id, on_event=on_event)
+            queue.put_nowait(done_event())
         except HTTPException as exc:
             queue.put_nowait(("error", {"detail": exc.detail}))
         except Exception:
